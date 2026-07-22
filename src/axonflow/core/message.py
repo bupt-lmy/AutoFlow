@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from uuid import uuid4
 
+from axonflow.core.protocol import PROTOCOL_VERSION
 
-class MessageType(str, Enum):
+
+class MessageType(StrEnum):
     """消息类型"""
 
     TASK_REQUEST = "task_request"
@@ -20,7 +22,7 @@ class MessageType(str, Enum):
     CONTROL = "control"
 
 
-class ControlAction(str, Enum):
+class ControlAction(StrEnum):
     """控制指令"""
 
     PAUSE = "pause"
@@ -42,10 +44,13 @@ class Message:
     priority: int = 5
     context: dict = field(default_factory=dict)
     created_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
     ttl: int | None = None
     parent_message_id: str | None = None
+    protocol_version: str = PROTOCOL_VERSION
+    session_id: str = ""
+    task_id: str = ""
 
     def to_json(self) -> str:
         """序列化为 JSON 字符串"""
@@ -62,6 +67,9 @@ class Message:
             "created_at": self.created_at,
             "ttl": self.ttl,
             "parent_message_id": self.parent_message_id,
+            "protocol_version": self.protocol_version,
+            "session_id": self.session_id,
+            "task_id": self.task_id,
         }
         return json.dumps(data, ensure_ascii=False)
 
@@ -88,4 +96,7 @@ class Message:
             workflow_id=self.workflow_id,
             step_id=self.step_id,
             parent_message_id=self.id,
+            protocol_version=self.protocol_version,
+            session_id=self.session_id,
+            task_id=self.task_id,
         )

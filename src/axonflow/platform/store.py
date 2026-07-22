@@ -10,6 +10,13 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from axonflow.media.models import (
+    AssetKind,
+    AssetStatus,
+    MediaAsset,
+    RenderJob,
+    RenderJobStatus,
+)
 from axonflow.platform.credentials import CredentialCipher, masked_secret
 from axonflow.platform.models import PlatformWorkflow
 
@@ -81,6 +88,27 @@ class PlatformStore:
                     media_type TEXT,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS media_assets (
+                    id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_media_assets_kind
+                  ON media_assets(kind, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_media_assets_status
+                  ON media_assets(status, created_at DESC);
+                CREATE TABLE IF NOT EXISTS render_jobs (
+                    id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_render_jobs_status
+                  ON render_jobs(status, created_at DESC);
                 CREATE TABLE IF NOT EXISTS credentials (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL UNIQUE,
@@ -110,6 +138,7 @@ class PlatformStore:
                     workflow_id TEXT,
                     execution_id TEXT,
                     agent_id TEXT,
+                    trace_kind TEXT NOT NULL DEFAULT 'unscoped',
                     provider TEXT NOT NULL,
                     model TEXT NOT NULL,
                     credential_id TEXT,
@@ -131,7 +160,131 @@ class PlatformStore:
                   ON llm_spans(workflow_id, started_at DESC);
                 """
             )
+            span_columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(llm_spans)").fetchall()
+            }
+            if "trace_kind" not in span_columns:
+                self._connection.execute(
+                    "ALTER TABLE llm_spans "
+                    "ADD COLUMN trace_kind TEXT NOT NULL DEFAULT 'unscoped'"
+                )
+            # Before trace_kind existed, business Agent spans already carried agent_id.
+            self._connection.execute(
+                "UPDATE llm_spans SET trace_kind = 'agent' "
+                "WHERE trace_kind = 'unscoped' AND agent_id IS NOT NULL AND agent_id != ''"
+            )
+            # Older retries could leave the failed attempt's error on a recovered node.
+            self._connection.execute(
+                "UPDATE node_runs SET error = NULL "
+                "WHERE status = 'completed' AND error IS NOT NULL"
+            )
             self._connection.commit()
+
+    def save_media_asset(self, asset: MediaAsset) -> MediaAsset:
+        """Create or replace media metadata without touching the referenced bytes."""
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO media_assets(id, payload, kind, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  payload = excluded.payload,
+                  kind = excluded.kind,
+                  status = excluded.status,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    asset.id,
+                    asset.model_dump_json(),
+                    asset.kind.value,
+                    asset.status.value,
+                    asset.created_at,
+                    asset.updated_at,
+                ),
+            )
+            self._connection.commit()
+        return asset
+
+    def get_media_asset(self, asset_id: str) -> MediaAsset | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM media_assets WHERE id = ?",
+                (asset_id,),
+            ).fetchone()
+        return MediaAsset.model_validate_json(row["payload"]) if row else None
+
+    def list_media_assets(
+        self,
+        kind: AssetKind | None = None,
+        status: AssetStatus | None = None,
+    ) -> list[MediaAsset]:
+        clauses: list[str] = []
+        values: list[str] = []
+        if kind is not None:
+            clauses.append("kind = ?")
+            values.append(kind.value)
+        if status is not None:
+            clauses.append("status = ?")
+            values.append(status.value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT payload FROM media_assets {where} ORDER BY created_at DESC",
+                values,
+            ).fetchall()
+        return [MediaAsset.model_validate_json(row["payload"]) for row in rows]
+
+    def delete_media_asset(self, asset_id: str) -> bool:
+        """Delete only the registry entry; object deletion is a separate explicit operation."""
+        with self._lock:
+            cursor = self._connection.execute(
+                "DELETE FROM media_assets WHERE id = ?",
+                (asset_id,),
+            )
+            self._connection.commit()
+        return cursor.rowcount > 0
+
+    def save_render_job(self, job: RenderJob) -> RenderJob:
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO render_jobs(id, payload, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  payload = excluded.payload,
+                  status = excluded.status,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    job.id,
+                    job.model_dump_json(),
+                    job.status.value,
+                    job.created_at,
+                    job.updated_at,
+                ),
+            )
+            self._connection.commit()
+        return job
+
+    def get_render_job(self, job_id: str) -> RenderJob | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM render_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        return RenderJob.model_validate_json(row["payload"]) if row else None
+
+    def list_render_jobs(self, status: RenderJobStatus | None = None) -> list[RenderJob]:
+        if status is None:
+            query = "SELECT payload FROM render_jobs ORDER BY created_at DESC"
+            values: tuple[str, ...] = ()
+        else:
+            query = "SELECT payload FROM render_jobs WHERE status = ? ORDER BY created_at DESC"
+            values = (status.value,)
+        with self._lock:
+            rows = self._connection.execute(query, values).fetchall()
+        return [RenderJob.model_validate_json(row["payload"]) for row in rows]
 
     def get_workflow(self, workflow_id: str) -> PlatformWorkflow | None:
         with self._lock:
@@ -278,6 +431,64 @@ class PlatformStore:
             self._connection.commit()
         return cursor.rowcount > 0
 
+    def update_credential(
+        self,
+        credential_id: str,
+        name: str,
+        provider: str,
+        source: str,
+        secret: str | None = None,
+        env_var: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Update credential metadata and rotate its secret only when one is supplied."""
+        if source not in {"encrypted", "environment"}:
+            raise ValueError("Credential source must be encrypted or environment")
+        with self._lock:
+            current = self._connection.execute(
+                "SELECT source, encrypted_secret, masked_value FROM credentials WHERE id = ?",
+                (credential_id,),
+            ).fetchone()
+            if current is None:
+                return None
+
+            if source == "environment":
+                if not env_var:
+                    raise ValueError("Environment credentials require an environment variable")
+                encrypted_secret = None
+                normalized_env_var = env_var.strip()
+                masked_value = f"env:{normalized_env_var}"
+            else:
+                normalized_env_var = None
+                if secret:
+                    encrypted_secret = self._cipher.encrypt(secret)
+                    masked_value = masked_secret(secret)
+                elif current["source"] == "encrypted" and current["encrypted_secret"]:
+                    encrypted_secret = current["encrypted_secret"]
+                    masked_value = current["masked_value"]
+                else:
+                    raise ValueError("A secret is required when switching to encrypted storage")
+
+            self._connection.execute(
+                """
+                UPDATE credentials SET
+                  name = ?, provider = ?, source = ?, env_var = ?, encrypted_secret = ?,
+                  masked_value = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    name.strip(),
+                    provider.strip(),
+                    source,
+                    normalized_env_var,
+                    encrypted_secret,
+                    masked_value,
+                    _now(),
+                    credential_id,
+                ),
+            )
+            self._connection.commit()
+        return self.get_credential(credential_id)
+
     def create_model_profile(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
         profile_id = f"model-{uuid.uuid4().hex[:12]}"
         now = _now()
@@ -315,6 +526,24 @@ class PlatformStore:
             )
             self._connection.commit()
         return cursor.rowcount > 0
+
+    def update_model_profile(
+        self,
+        profile_id: str,
+        name: str,
+        config: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            cursor = self._connection.execute(
+                """
+                UPDATE model_profiles SET name = ?, payload = ?, updated_at = ? WHERE id = ?
+                """,
+                (name.strip(), json.dumps(config, ensure_ascii=False), _now(), profile_id),
+            )
+            self._connection.commit()
+        if cursor.rowcount == 0:
+            return None
+        return self.get_model_profile(profile_id)
 
     @staticmethod
     def _model_profile_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -359,9 +588,10 @@ class PlatformStore:
             self._connection.execute(
                 """
                 INSERT INTO llm_spans(
-                  id, run_id, workflow_id, execution_id, agent_id, provider, model, credential_id,
+                  id, run_id, workflow_id, execution_id, agent_id, trace_kind, provider, model,
+                  credential_id,
                   status, started_at, input_preview, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
                 """,
                 (
                     span["id"],
@@ -369,6 +599,7 @@ class PlatformStore:
                     span.get("workflow_id"),
                     span.get("execution_id"),
                     span.get("agent_id"),
+                    span.get("trace_kind", "unscoped"),
                     span["provider"],
                     span["model"],
                     span.get("credential_id"),
@@ -407,6 +638,9 @@ class PlatformStore:
         run_id: str | None = None,
         workflow_id: str | None = None,
         agent_id: str | None = None,
+        trace_kind: str | None = None,
+        exclude_trace_kind: str | None = None,
+        attributed_only: bool = False,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         values: list[str] = []
@@ -414,17 +648,40 @@ class PlatformStore:
             ("run_id", run_id),
             ("workflow_id", workflow_id),
             ("agent_id", agent_id),
+            ("trace_kind", trace_kind),
         )
         for field, value in filters:
             if value:
                 clauses.append(f"{field} = ?")
                 values.append(value)
+        if exclude_trace_kind:
+            clauses.append("trace_kind != ?")
+            values.append(exclude_trace_kind)
+        if attributed_only:
+            clauses.append("agent_id IS NOT NULL AND agent_id != ''")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
             rows = self._connection.execute(
                 f"SELECT * FROM llm_spans {where} ORDER BY started_at DESC LIMIT 500", values
             ).fetchall()
         return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows]
+
+    def list_execution_contexts(self) -> dict[str, tuple[str, str]]:
+        """Map persisted engine execution IDs to product run and workflow IDs."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT run_id, workflow_id, result FROM workflow_runs WHERE result IS NOT NULL"
+            ).fetchall()
+        contexts: dict[str, tuple[str, str]] = {}
+        for row in rows:
+            try:
+                result = json.loads(row["result"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            execution_id = result.get("workflow_id") if isinstance(result, dict) else None
+            if isinstance(execution_id, str) and execution_id:
+                contexts[execution_id] = (row["run_id"], row["workflow_id"])
+        return contexts
 
     def update_node_run(
         self,
@@ -448,7 +705,10 @@ class PlatformStore:
                   started_at = COALESCE(node_runs.started_at, excluded.started_at),
                   completed_at = excluded.completed_at,
                   output = COALESCE(excluded.output, node_runs.output),
-                  error = COALESCE(excluded.error, node_runs.error)
+                  error = CASE
+                    WHEN excluded.status = 'completed' THEN NULL
+                    ELSE COALESCE(excluded.error, node_runs.error)
+                  END
                 """,
                 (
                     run_id,
@@ -507,6 +767,7 @@ class PlatformStore:
         if row is None:
             return None
         result = self._run_row(row)
+        result["workflow_snapshot"] = json.loads(row["workflow_snapshot"])
         result["node_runs"] = [
             {
                 **dict(node_row),

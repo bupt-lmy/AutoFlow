@@ -107,7 +107,14 @@ def _validate_agents(workflow: PlatformWorkflow) -> None:
             detail="A workflow must contain at least one Agent node",
         )
     available = {agent.id for agent in load_all_agent_configs(get_config_dir() / "agents")}
-    missing = sorted({node.agent_id for node in workflow.nodes} - available)
+    missing = sorted(
+        {
+            node.agent_id
+            for node in workflow.nodes
+            if node.node_type == "agent" and node.agent_id is not None
+        }
+        - available
+    )
     if missing:
         raise HTTPException(status_code=422, detail=f"Unknown Agent IDs: {', '.join(missing)}")
 
@@ -168,6 +175,7 @@ async def create_workflow(body: WorkflowCreateRequest) -> dict[str, Any]:
     _validate_agents(workflow)
     _write_runtime_config(workflow)
     store.save_workflow(workflow)
+    get_engine().sync_workflow_schedule(workflow.to_workflow_config())
     return _response(workflow)
 
 
@@ -195,6 +203,7 @@ async def update_workflow(workflow_id: str, body: WorkflowUpdateRequest) -> dict
     _validate_agents(workflow)
     _write_runtime_config(workflow)
     get_platform_store().save_workflow(workflow)
+    get_engine().sync_workflow_schedule(workflow.to_workflow_config())
     return _response(workflow)
 
 
@@ -216,12 +225,16 @@ async def run_workflow(workflow_id: str, body: RunRequest) -> dict[str, str]:
                 execution_id = str(data["execution_id"])
                 execution_ids.add(execution_id)
                 if engine._execution_logger is not None:
-                    engine._execution_logger.set_run_id(execution_id, run_id)
+                    engine._execution_logger.set_run_context(
+                        execution_id,
+                        run_id,
+                        workflow_id,
+                    )
                 return
 
             event_data = dict(data)
-            agent_id = event_data.get("agent_id")
-            if agent_id:
+            agent_id = event_data.get("agent_id") or event_data.get("supervisor_agent_id")
+            if isinstance(agent_id, str):
                 node_id = workflow.node_id_for_agent(agent_id)
                 if node_id:
                     event_data["node_id"] = node_id
@@ -242,13 +255,20 @@ async def run_workflow(workflow_id: str, body: RunRequest) -> dict[str, str]:
                             output=event_data.get("payload"),
                             error=event_data.get("error"),
                         )
+                    elif event_type == "supervisor.review_started":
+                        store.update_node_run(run_id, node_id, agent_id, "reviewing")
+                    elif event_type == "supervisor.decision_ready":
+                        store.update_node_run(run_id, node_id, agent_id, "completed")
             await _publish_event(run_id, workflow_id, event_type, event_data)
 
         try:
             await engine.start_workflow_trace(run_id, workflow_id, body.input)
             await _publish_event(run_id, workflow_id, "workflow.started", {"input": body.input})
             result = await engine.run_workflow(
-                workflow_id, body.input, event_callback=_on_orchestrator_event
+                workflow_id,
+                body.input,
+                event_callback=_on_orchestrator_event,
+                run_id=run_id,
             )
             result_data = result.to_dict()
             trace_result = result_data

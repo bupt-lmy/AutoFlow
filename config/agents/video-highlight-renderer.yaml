@@ -1,0 +1,14 @@
+agent:
+  id: agent-video-highlight-renderer
+  name: "精彩片段剪辑渲染器"
+  role: "按选择的源时间范围保留真实动作与原声，拼接输出剪辑成片。"
+  agent_type: custom
+  class_path: axonflow.agents.video_edit.VideoHighlightRendererAgent
+  tools: [highlight_render]
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    render:
+      width: 1920
+      height: 1080
+      fps: 30

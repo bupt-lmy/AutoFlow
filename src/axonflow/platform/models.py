@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, model_validator
 from axonflow.config.models import (
     AgentConfig,
     AgentInstanceConfig,
+    DiscoveryConfig,
     FlowConfig,
     Route,
     RouteCondition,
@@ -55,6 +56,7 @@ class AgentManifest(BaseModel):
     )
     deploy_mode: Literal["platform", "local_runner", "remote"] = "platform"
     tools: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
     model: str | None = None
 
     @classmethod
@@ -64,8 +66,16 @@ class AgentManifest(BaseModel):
             id=config.id,
             name=config.name,
             description=description[:240],
-            tags=["built-in", config.agent_type],
+            tags=list(dict.fromkeys(["built-in", config.agent_type, *config.tags])),
+            deploy_mode=(
+                "remote"
+                if config.agent_type == "remote"
+                else "local_runner"
+                if config.agent_type == "codex"
+                else "platform"
+            ),
             tools=config.tools,
+            skills=config.skills,
             model=config.model.name,
         )
 
@@ -74,11 +84,23 @@ class WorkflowNode(BaseModel):
     """An executable Agent node in a visual workflow."""
 
     id: str
-    agent_id: str
+    node_type: Literal["agent", "discovery"] = "agent"
+    agent_id: str | None = None
     label: str
     position: CanvasPosition = Field(default_factory=CanvasPosition)
     is_entry: bool = False
     config: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_binding(self) -> WorkflowNode:
+        discovery = self.config.get("discovery")
+        if self.node_type == "agent" and not self.agent_id:
+            raise ValueError("Agent node requires agent_id")
+        if self.node_type == "discovery":
+            if self.agent_id is not None:
+                raise ValueError("Discovery node cannot define agent_id")
+            DiscoveryConfig.model_validate(discovery)
+        return self
 
 
 class WorkflowEdge(BaseModel):
@@ -88,6 +110,8 @@ class WorkflowEdge(BaseModel):
     source: str
     target: str
     condition: RouteCondition | None = None
+    payload_mapping: dict[str, Any] | None = None
+    routing: Literal["default", "loopback"] = "default"
 
 
 class PlatformWorkflow(BaseModel):
@@ -119,6 +143,31 @@ class PlatformWorkflow(BaseModel):
                 raise ValueError(f"Edge '{edge.id}' references an unknown node")
             if edge.source == edge.target:
                 raise ValueError("A node cannot route to itself")
+        if self.supervisor is not None:
+            normalized_supervisor = {
+                "responsibility": (
+                    "Review every Agent result, enforce workflow quality gates, and decide "
+                    "whether to continue, request rework, reassign, or finish."
+                ),
+                "capabilities": [
+                    "execution planning",
+                    "result review",
+                    "routing control",
+                    "failure recovery",
+                ],
+                "planning_enabled": True,
+                "intervention_on_failure": True,
+                **self.supervisor,
+            }
+            supervisor_id = normalized_supervisor.get("agent_id")
+            if isinstance(supervisor_id, str) and supervisor_id not in known:
+                matching_node = next(
+                    (node for node in self.nodes if node.agent_id == supervisor_id),
+                    None,
+                )
+                if matching_node is not None:
+                    normalized_supervisor["agent_id"] = matching_node.id
+            self.supervisor = normalized_supervisor
         return self
 
     @classmethod
@@ -135,6 +184,7 @@ class PlatformWorkflow(BaseModel):
             nodes = [
                 WorkflowNode(
                     id=instance.node_id,
+                    node_type="discovery" if instance.discovery else "agent",
                     agent_id=instance.template_id,
                     label=instance.name,
                     position=CanvasPosition(x=80 + index * 260, y=220),
@@ -151,6 +201,20 @@ class PlatformWorkflow(BaseModel):
                         **(
                             {"model_profile_id": instance.model_profile_id}
                             if instance.model_profile_id
+                            else {}
+                        ),
+                        **(
+                            {"discovery": instance.discovery.model_dump(mode="json")}
+                            if instance.discovery
+                            else {}
+                        ),
+                        **(
+                            {
+                                "fallback_discovery": instance.fallback_discovery.model_dump(
+                                    mode="json"
+                                )
+                            }
+                            if instance.fallback_discovery
                             else {}
                         ),
                         **(
@@ -189,7 +253,9 @@ class PlatformWorkflow(BaseModel):
                 )
                 for index, agent_id in enumerate(config.agents)
             ]
-            node_id_by_runtime_id = {node.agent_id: node.id for node in nodes}
+            node_id_by_runtime_id = {
+                node.agent_id: node.id for node in nodes if node.agent_id is not None
+            }
         edges: list[WorkflowEdge] = []
         for source_agent, routes in config.flow.routes.items():
             for index, route in enumerate(routes):
@@ -202,9 +268,18 @@ class PlatformWorkflow(BaseModel):
                             source=source,
                             target=target,
                             condition=route.condition,
+                            payload_mapping=(
+                                route.payload_mapping.model_dump(mode="json")
+                                if route.payload_mapping
+                                else None
+                            ),
                         )
                     )
         supervisor = config.flow.supervisor.model_dump() if config.flow.supervisor else None
+        if supervisor and isinstance(supervisor.get("agent_id"), str):
+            supervisor["agent_id"] = node_id_by_runtime_id.get(
+                supervisor["agent_id"], supervisor["agent_id"]
+            )
         return cls(
             id=config.id,
             name=config.name,
@@ -225,14 +300,25 @@ class PlatformWorkflow(BaseModel):
             node.id: self.runtime_agent_id(node) for node in self.nodes
         }
         runtime_id_by_template_id = {
-            node.agent_id: runtime_id_by_node_id[node.id] for node in self.nodes
+            node.id: runtime_id_by_node_id[node.id] for node in self.nodes
         }
+        runtime_id_by_template_id.update(
+            {
+                node.agent_id: runtime_id_by_node_id[node.id]
+                for node in self.nodes
+                if node.agent_id is not None
+            }
+        )
         routes: dict[str, list[Route]] = {}
         for edge in self.edges:
             source_agent = runtime_id_by_node_id[edge.source]
             target_agent = runtime_id_by_node_id[edge.target]
             routes.setdefault(source_agent, []).append(
-                Route(target=target_agent, condition=edge.condition)
+                Route(
+                    target=target_agent,
+                    condition=edge.condition,
+                    payload_mapping=edge.payload_mapping,
+                )
             )
         context = dict(self.context)
         role_overrides = {
@@ -295,6 +381,17 @@ class PlatformWorkflow(BaseModel):
                         if isinstance(node.config.get("model_profile_id"), str)
                         else None
                     ),
+                    discovery=(
+                        DiscoveryConfig.model_validate(node.config.get("discovery"))
+                        if node.node_type == "discovery"
+                        else None
+                    ),
+                    fallback_discovery=(
+                        DiscoveryConfig.model_validate(node.config.get("fallback_discovery"))
+                        if node.node_type == "agent"
+                        and node.config.get("fallback_discovery") is not None
+                        else None
+                    ),
                 )
                 for node in self.nodes
             ],
@@ -327,6 +424,9 @@ class PlatformWorkflow(BaseModel):
     def node_id_for_agent(self, agent_id: str) -> str | None:
         for node in self.nodes:
             runtime_id = self.runtime_agent_id(node)
-            if agent_id in {node.agent_id, runtime_id} or agent_id.endswith(f"--{runtime_id}"):
+            known_ids = {runtime_id}
+            if node.agent_id is not None:
+                known_ids.add(node.agent_id)
+            if agent_id in known_ids or agent_id.endswith(f"--{runtime_id}"):
                 return node.id
         return None

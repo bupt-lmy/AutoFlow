@@ -9,15 +9,39 @@ from typing import Any
 
 import structlog
 
-from axonflow.config.models import WorkflowConfig
+from axonflow.config.models import RoutePayloadMapping, WorkflowConfig
 from axonflow.core.agent import AgentRegistry
 from axonflow.core.context import WorkflowContext
 from axonflow.core.message import Message, MessageType
+from axonflow.core.protocol import (
+    DataItem,
+    TaskCommand,
+    TaskCommandType,
+    protocol_context,
+)
 from axonflow.messaging.base import MessageBus
 
 logger = structlog.get_logger()
 
 OrchestratorEventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+def map_route_payload(payload: dict, mapping: RoutePayloadMapping | None) -> dict:
+    """Apply edge-level business payload selection while preserving protocol lineage."""
+    if mapping is None or not mapping.include:
+        mapped = dict(payload)
+    else:
+        mapped = {field: payload[field] for field in mapping.include if field in payload}
+
+    if mapping is not None and mapping.task_field:
+        task_value = payload.get(mapping.task_field)
+        if task_value is not None:
+            mapped["task"] = task_value
+
+    protocol = payload.get("_protocol")
+    if isinstance(protocol, dict):
+        mapped["_protocol"] = protocol
+    return mapped
 
 
 class WorkflowResult:
@@ -63,12 +87,14 @@ class BaseOrchestrator(ABC):
         agent_registry: AgentRegistry,
         message_bus: MessageBus,
         event_callback: OrchestratorEventCallback | None = None,
+        run_id: str | None = None,
         **kwargs,
     ) -> None:
         self.config = config
         self.agents = agent_registry
         self.message_bus = message_bus
         self._event_callback = event_callback
+        self.run_id = run_id
 
     # -- 抽象方法 ----------------------------------------------------------
 
@@ -83,6 +109,8 @@ class BaseOrchestrator(ABC):
         """创建工作流上下文"""
         ctx = WorkflowContext(input=initial_input)
         ctx.shared_state.update(self.config.context)
+        ctx.shared_state["_workflow_id"] = self.config.id
+        ctx.shared_state["_run_id"] = self.run_id
         return ctx
 
     def _inject_context(self, ctx: WorkflowContext) -> None:
@@ -111,21 +139,48 @@ class BaseOrchestrator(ABC):
         source_id: str | None = None,
     ) -> None:
         """发送任务消息给指定 Agent"""
+        task_id = f"{workflow_id}:{step_id}:{target_id}"
+        dispatch_payload = dict(payload)
+        previous_protocol = dispatch_payload.get("_protocol")
+        task_protocol = protocol_context(
+            session_id=workflow_id,
+            task_id=task_id,
+            selected_agent=target_id,
+        )
+        if isinstance(previous_protocol, dict) and previous_protocol.get("task_id"):
+            task_protocol["parent_task_id"] = previous_protocol["task_id"]
+        task_protocol["command"] = TaskCommand(
+            session_id=workflow_id,
+            task_id=task_id,
+            command=TaskCommandType.START,
+            sender_id=self.ORCHESTRATOR_ID,
+            data_items=[
+                DataItem(
+                    type="data",
+                    data={
+                        key: value for key, value in dispatch_payload.items() if key != "_protocol"
+                    },
+                )
+            ],
+        ).model_dump(mode="json")
+        dispatch_payload["_protocol"] = task_protocol
         msg = Message(
             sender=self.ORCHESTRATOR_ID,
             receiver=target_id,
             type=MessageType.TASK_REQUEST,
-            payload=payload,
+            payload=dispatch_payload,
             workflow_id=workflow_id,
             step_id=step_id,
             parent_message_id=parent_id,
+            session_id=workflow_id,
+            task_id=task_id,
         )
         await self.message_bus.send(msg)
         event_data = {
             "agent_id": target_id,
             "source_agent_id": source_id,
             "step_id": step_id,
-            "payload": payload,
+            "payload": dispatch_payload,
         }
         await self._emit("node.task_assigned", event_data)
         await self._emit("node.task_started", event_data)
@@ -185,6 +240,12 @@ class FlatOrchestrator(BaseOrchestrator):
         for target, cfg in join_cfg.items():
             for waited in cfg.wait_for:
                 sender_to_join_targets.setdefault(waited, []).append(target)
+        join_routes = {
+            (source, route.target): route
+            for source, routes in self.config.flow.routes.items()
+            for route in routes
+            if route.target in join_cfg
+        }
 
         # 5. 事件循环
         iteration = 0
@@ -240,7 +301,7 @@ class FlatOrchestrator(BaseOrchestrator):
                 )
                 return WorkflowResult(
                     workflow_id=workflow_id,
-                    status="completed",
+                    status=("completed" if event.payload.get("status") == "success" else "failed"),
                     output=event.payload,
                     iterations=iteration,
                     duration_seconds=elapsed,
@@ -248,10 +309,17 @@ class FlatOrchestrator(BaseOrchestrator):
 
             # ---- fan-in/join 记录 ----
             # 如果当前 sender 是某个 join 目标的 wait_for 成员，记录其结果
-            join_dispatched_targets: set[str] = set()
             if event.sender in sender_to_join_targets:
                 for join_target in sender_to_join_targets[event.sender]:
-                    join_pending[join_target][event.sender] = event.payload
+                    route = join_routes.get((event.sender, join_target))
+                    if route and route.condition is not None:
+                        actual_value = event.payload.get(route.condition.field)
+                        if not route.condition.evaluate(actual_value):
+                            continue
+                    join_pending[join_target][event.sender] = map_route_payload(
+                        event.payload,
+                        route.payload_mapping if route else None,
+                    )
                     cfg = join_cfg[join_target]
 
                     # 判断 join 条件是否满足
@@ -274,15 +342,14 @@ class FlatOrchestrator(BaseOrchestrator):
                             parent_id=event.id,
                             source_id=event.sender,
                         )
-                        join_dispatched_targets.add(join_target)
                         # 重置该 join 点的待收集状态
                         join_pending[join_target] = {}
 
             # ---- 常规路由 ----
             next_targets = self._resolve_next(event)
             for target_id, payload in next_targets:
-                # 如果目标是 join 点且尚未被 fan-in 触发，跳过常规分发
-                if target_id in join_cfg and target_id not in join_dispatched_targets:
+                # Join 目标只能由上面的 fan-in 逻辑派发，不能再走普通路由重复派发。
+                if target_id in join_cfg:
                     continue
                 await self._dispatch(
                     target_id=target_id,
@@ -313,14 +380,15 @@ class FlatOrchestrator(BaseOrchestrator):
 
         targets = []
         for route in routes:
+            routed_payload = map_route_payload(event.payload, route.payload_mapping)
             if route.condition is None:
                 # 无条件路由（默认路由）
-                targets.append((route.target, event.payload))
+                targets.append((route.target, routed_payload))
             else:
                 # 有条件路由
                 actual_value = event.payload.get(route.condition.field)
                 if route.condition.evaluate(actual_value):
-                    targets.append((route.target, event.payload))
+                    targets.append((route.target, routed_payload))
 
         return targets
 

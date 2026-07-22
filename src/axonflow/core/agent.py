@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import time
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from axonflow.config.loader import load_skill_content
 from axonflow.config.models import AgentConfig
 from axonflow.core.context import WorkflowContext
 from axonflow.core.message import Message, MessageType
+from axonflow.core.protocol import DataItem, Product, TaskResult, TaskState, TaskStatus
 from axonflow.llm.gateway import LLMGateway, LLMTraceContext
 from axonflow.llm.prompt_builder import PromptBuilder
 from axonflow.memory.base import MemoryRecord, MemoryScope, MemoryStore
@@ -27,7 +29,7 @@ from axonflow.tools.base import ToolRegistry
 logger = structlog.get_logger()
 
 
-class AgentState(str, Enum):
+class AgentState(StrEnum):
     """智能体状态"""
 
     IDLE = "idle"
@@ -35,6 +37,15 @@ class AgentState(str, Enum):
     WORKING = "working"
     ERROR = "error"
     STOPPED = "stopped"
+
+
+class AgentHealthState(StrEnum):
+    """Actual availability of the Agent's model or remote endpoint."""
+
+    UNKNOWN = "unknown"
+    CHECKING = "checking"
+    HEALTHY = "healthy"
+    UNHEALTHY = "unhealthy"
 
 
 class BaseAgent:
@@ -65,6 +76,12 @@ class BaseAgent:
         self.llm_gateway = llm_gateway
         self.tool_registry = tool_registry
         self.state = AgentState.IDLE
+        self.health_state = AgentHealthState.UNKNOWN
+        self.last_health_check_at: str | None = None
+        self.last_health_success_at: str | None = None
+        self.health_error: str | None = None
+        self.health_latency_ms: int | None = None
+        self._health_lock = asyncio.Lock()
         self.parameters: dict[str, Any] = config.parameters
 
         # 记忆系统
@@ -109,6 +126,8 @@ class BaseAgent:
 
                 result = await self._process_with_retry(message)
                 await self._send_response(message, result)
+                if self.state != AgentState.STOPPED:
+                    self.state = AgentState.RUNNING
 
             except asyncio.CancelledError:
                 logger.info("agent.cancelled", agent_id=self.id)
@@ -126,6 +145,64 @@ class BaseAgent:
         """停止 Agent"""
         self.state = AgentState.STOPPED
 
+    async def _health_probe(self) -> None:
+        """Send a minimal command through the configured model endpoint."""
+        await self.llm_gateway.chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "This is an availability probe. Reply with OK only.",
+                },
+                {"role": "user", "content": "PING"},
+            ],
+            model_config=self.config.model,
+            prefer_default=False,
+            max_tokens=8,
+            temperature=0,
+            trace_context=LLMTraceContext(
+                workflow_id="__health__",
+                execution_id=f"health:{self.id}",
+                agent_id=self.id,
+                trace_kind="health",
+            ),
+        )
+
+    async def check_health(self, timeout_seconds: float = 15) -> dict[str, Any]:
+        """Probe actual model/endpoint availability and update health metadata."""
+        async with self._health_lock:
+            self.health_state = AgentHealthState.CHECKING
+            started = time.monotonic()
+            checked_at = datetime.now(UTC).isoformat()
+            try:
+                await asyncio.wait_for(self._health_probe(), timeout=timeout_seconds)
+            except Exception as exc:
+                self.health_state = AgentHealthState.UNHEALTHY
+                self.health_error = str(exc)[:1000]
+                logger.warning(
+                    "agent.health_check_failed",
+                    agent_id=self.id,
+                    error=self.health_error,
+                )
+            else:
+                self.health_state = AgentHealthState.HEALTHY
+                self.health_error = None
+                self.last_health_success_at = checked_at
+                logger.info("agent.health_check_passed", agent_id=self.id)
+            self.last_health_check_at = checked_at
+            self.health_latency_ms = int((time.monotonic() - started) * 1000)
+            return self.health_status()
+
+    def health_status(self) -> dict[str, Any]:
+        """Return API-safe health information independently from activity state."""
+        return {
+            "state": self.health_state.value,
+            "ready": self.health_state == AgentHealthState.HEALTHY,
+            "last_checked_at": self.last_health_check_at,
+            "last_success_at": self.last_health_success_at,
+            "latency_ms": self.health_latency_ms,
+            "error": self.health_error,
+        }
+
     async def _process_with_retry(self, message: Message) -> dict:
         """带重试的消息处理"""
         last_error = None
@@ -134,6 +211,7 @@ class BaseAgent:
                 return await self.handle_message(message)
             except Exception as e:
                 last_error = e
+                will_retry = attempt < self.config.retry_limit
                 logger.warning(
                     "agent.retry",
                     agent_id=self.id,
@@ -141,7 +219,23 @@ class BaseAgent:
                     max_retries=self.config.retry_limit,
                     error=str(e),
                 )
-                if attempt < self.config.retry_limit:
+                if will_retry:
+                    self._log_execution(
+                        workflow_id=message.workflow_id,
+                        action="agent_retry",
+                        tool_name=None,
+                        arguments={
+                            "failed_attempt": attempt,
+                            "next_attempt": attempt + 1,
+                            "max_attempts": self.config.retry_limit,
+                        },
+                        round_num=attempt,
+                        error=str(e),
+                        message_id=message.id,
+                        task_preview=str(
+                            message.payload.get("task") or message.payload.get("content") or ""
+                        )[:200],
+                    )
                     await asyncio.sleep(2**attempt)  # 指数退避
 
         return {
@@ -177,7 +271,22 @@ class BaseAgent:
             skill_content=skill_content,
         )
 
-        max_tool_rounds = 10
+        configured_rounds = self.parameters.get("max_tool_rounds", 10)
+        try:
+            max_tool_rounds = int(configured_rounds)
+        except (TypeError, ValueError):
+            max_tool_rounds = 10
+        max_tool_rounds = min(max(max_tool_rounds, 1), 50)
+        trace_workflow_id = (
+            str(context.get_state("_workflow_id", message.workflow_id))
+            if context
+            else message.workflow_id
+        )
+        trace_run_id = context.get_state("_run_id") if context else None
+        if not trace_run_id and self.execution_logger:
+            trace_run_id = self.execution_logger.get_run_id(message.workflow_id)
+        last_tool_name: str | None = None
+        last_tool_arguments: str | None = None
         for round_num in range(1, max_tool_rounds + 1):
             llm_response = await self.llm_gateway.chat(
                 messages=messages,
@@ -185,12 +294,11 @@ class BaseAgent:
                 tools=tool_schemas if tool_schemas else None,
                 prefer_default=False,
                 trace_context=LLMTraceContext(
-                    workflow_id=message.workflow_id,
+                    workflow_id=trace_workflow_id,
                     execution_id=message.workflow_id,
                     agent_id=self.id,
-                    run_id=self.execution_logger.get_run_id(message.workflow_id)
-                    if self.execution_logger
-                    else None,
+                    run_id=trace_run_id,
+                    trace_kind="agent",
                 ),
             )
 
@@ -209,6 +317,12 @@ class BaseAgent:
                     tc_id = tc["id"]
                     func_name = tc["function"]["name"]
                     func_args_raw = tc["function"]["arguments"]
+                    last_tool_name = func_name
+                    last_tool_arguments = (
+                        func_args_raw
+                        if isinstance(func_args_raw, str)
+                        else json.dumps(func_args_raw, ensure_ascii=False, default=str)
+                    )[:500]
 
                     # 解析 JSON 参数
                     try:
@@ -303,6 +417,13 @@ class BaseAgent:
             arguments=None,
             error="Max tool call rounds exceeded",
             round_num=max_tool_rounds,
+            message_id=message.id,
+            task_preview=str(
+                message.payload.get("task") or message.payload.get("content") or ""
+            )[:200],
+            rounds_used=max_tool_rounds,
+            last_tool_name=last_tool_name,
+            last_tool_arguments=last_tool_arguments,
         )
         return {
             "status": "error",
@@ -318,6 +439,11 @@ class BaseAgent:
         round_num: int,
         result: str | None = None,
         error: str | None = None,
+        message_id: str | None = None,
+        task_preview: str | None = None,
+        rounds_used: int | None = None,
+        last_tool_name: str | None = None,
+        last_tool_arguments: str | None = None,
     ) -> None:
         """记录执行日志（如果 logger 存在）"""
         if self.execution_logger is None:
@@ -332,6 +458,11 @@ class BaseAgent:
             result=result,
             error=error,
             round=round_num,
+            message_id=message_id,
+            task_preview=task_preview,
+            rounds_used=rounds_used,
+            last_tool_name=last_tool_name,
+            last_tool_arguments=last_tool_arguments,
         )
         self.execution_logger.log(entry)
 
@@ -411,6 +542,33 @@ class BaseAgent:
 
     async def _send_response(self, original_message: Message, result: dict) -> None:
         """发送处理结果"""
+        if "task_result" not in result:
+            succeeded = result.get("status") == "success"
+            content = result.get("content")
+            error = result.get("error")
+            result["task_result"] = TaskResult(
+                session_id=original_message.session_id or original_message.workflow_id,
+                task_id=original_message.task_id or original_message.step_id,
+                sender_id=self.id,
+                status=TaskStatus(
+                    state=TaskState.COMPLETED if succeeded else TaskState.FAILED,
+                    data_items=(
+                        [DataItem(type="text", text=str(error))]
+                        if error is not None and not succeeded
+                        else []
+                    ),
+                ),
+                products=(
+                    [
+                        Product(
+                            name="Agent result",
+                            data_items=[DataItem(type="text", text=str(content))],
+                        )
+                    ]
+                    if content is not None
+                    else []
+                ),
+            ).model_dump(mode="json")
         response = original_message.reply(
             payload=result,
             msg_type=(
@@ -490,6 +648,10 @@ def create_agent(
         from axonflow.agents.remote import RemoteAgent
 
         agent_cls = RemoteAgent
+    elif config.agent_type == "codex":
+        from axonflow.agents.codex import CodexAgent
+
+        agent_cls = CodexAgent
     elif config.agent_type in _AGENT_TYPE_REGISTRY:
         agent_cls = _AGENT_TYPE_REGISTRY[config.agent_type]
     else:
@@ -555,3 +717,7 @@ class AgentRegistry:
     def get_states(self) -> dict[str, str]:
         """获取所有智能体状态"""
         return {agent.id: agent.state.value for agent in self._agents.values()}
+
+    def get_health(self) -> dict[str, dict[str, Any]]:
+        """Return model/endpoint readiness for every registered Agent."""
+        return {agent.id: agent.health_status() for agent in self._agents.values()}

@@ -4,8 +4,8 @@ import pytest
 
 from axonflow.config.models import AgentConfig, MemoryConfig, ModelConfig
 from axonflow.core.agent import (
-    BaseAgent,
     _AGENT_TYPE_REGISTRY,
+    BaseAgent,
     create_agent,
     register_agent_type,
 )
@@ -50,6 +50,22 @@ class TestAgentFactory:
         )
         assert isinstance(agent, BaseAgent)
         assert agent.id == "test-agent"
+
+    def test_create_codex_agent(self):
+        from axonflow.agents.codex import CodexAgent
+
+        config = _make_agent_config(agent_type="codex", parameters={"codex": {}})
+        bus, gateway, registry, memory = _make_deps()
+
+        agent = create_agent(
+            config=config,
+            message_bus=bus,
+            llm_gateway=gateway,
+            tool_registry=registry,
+            memory_store=memory,
+        )
+
+        assert isinstance(agent, CodexAgent)
 
     def test_create_agent_with_unknown_type_fallback(self):
         config = _make_agent_config(agent_type="unknown_type_xyz")
@@ -167,3 +183,11 @@ class TestAgentConfig:
     def test_parameters_field(self):
         config = _make_agent_config(parameters={"depth": 3, "verbose": True})
         assert config.parameters == {"depth": 3, "verbose": True}
+
+    def test_global_health_check_defaults(self):
+        from axonflow.config.models import AxonFlowConfig
+
+        config = AxonFlowConfig()
+        assert config.agent_health.enabled is True
+        assert config.agent_health.interval_seconds == 300
+        assert config.agent_health.timeout_seconds == 15

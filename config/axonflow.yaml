@@ -14,6 +14,12 @@ log_level: "INFO"
 log_format: "console"  # console / json
 workspace_dir: "./workspace"
 
+# Agent 可用性：启动时并行探测，并按间隔重复探测模型或远程端点
+agent_health:
+  enabled: true
+  interval_seconds: 300
+  timeout_seconds: 15
+
 default_model:
   provider: "openai"
   name: "qwen3-32b"

@@ -1,0 +1,14 @@
+agent:
+  id: agent-video-scene-analysis
+  name: "镜头切分与关键帧分析"
+  role: "检测源视频镜头边界，并为每个镜头抽取视觉关键帧。"
+  agent_type: custom
+  class_path: axonflow.agents.video_edit.VideoSceneAnalysisAgent
+  tools: [video_scene_detect]
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    scene_detection:
+      threshold: 8
+      min_scene_ms: 500
+      max_scenes: 240

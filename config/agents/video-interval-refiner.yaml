@@ -1,0 +1,16 @@
+agent:
+  id: agent-video-interval-refiner
+  name: "镜头内部动作热点精修器"
+  role: "根据逐时刻运动与音频曲线定位动作峰值，加入自然预留和收尾，并将边界对齐到输出帧。"
+  agent_type: custom
+  class_path: axonflow.agents.video_edit.VideoIntervalRefinerAgent
+  tools: []
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    refinement:
+      min_clip_ms: 800
+      max_clip_ms: 8000
+      pre_roll_ms: 350
+      post_roll_ms: 550
+      fps: 30

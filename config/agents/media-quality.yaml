@@ -1,0 +1,11 @@
+agent:
+  id: agent-media-quality
+  name: "成片技术质检"
+  role: "校验 MP4 的编码、音轨、尺寸、时长和完整可解码性。"
+  agent_type: custom
+  class_path: axonflow.agents.media.MediaQualityAgent
+  tools:
+    - media_quality_check
+  retry_limit: 1
+  memory:
+    enabled: false

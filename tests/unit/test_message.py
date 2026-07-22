@@ -24,6 +24,8 @@ class TestMessage:
             type=MessageType.TASK_RESPONSE,
             payload={"result": "ok", "data": [1, 2, 3]},
             workflow_id="wf-001",
+            session_id="session-001",
+            task_id="task-001",
         )
         json_str = msg.to_json()
         restored = Message.from_json(json_str)
@@ -33,6 +35,9 @@ class TestMessage:
         assert restored.type == msg.type
         assert restored.payload == msg.payload
         assert restored.workflow_id == msg.workflow_id
+        assert restored.protocol_version == "aip-lite/0.1"
+        assert restored.session_id == "session-001"
+        assert restored.task_id == "task-001"
         assert restored.id == msg.id
 
     def test_reply(self):
@@ -42,6 +47,8 @@ class TestMessage:
             type=MessageType.TASK_REQUEST,
             payload={"task": "do something"},
             workflow_id="wf-001",
+            session_id="session-001",
+            task_id="task-001",
         )
         reply = original.reply(payload={"result": "done"})
 
@@ -50,6 +57,9 @@ class TestMessage:
         assert reply.type == MessageType.TASK_RESPONSE
         assert reply.parent_message_id == original.id
         assert reply.workflow_id == original.workflow_id
+        assert reply.protocol_version == original.protocol_version
+        assert reply.session_id == original.session_id
+        assert reply.task_id == original.task_id
 
     def test_message_priority_default(self):
         msg = Message(

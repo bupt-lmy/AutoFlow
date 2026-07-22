@@ -11,14 +11,22 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from axonflow.api.deps import set_config_dir, set_engine, set_platform_store
+from axonflow.api.deps import (
+    set_config_dir,
+    set_engine,
+    set_media_storage,
+    set_platform_store,
+    set_render_job_runner,
+)
 from axonflow.api.routes import (
     agents,
+    assets,
     config,
     credentials,
     logs,
     model_profiles,
     observability,
+    render_jobs,
     skills,
     system,
     workflows,
@@ -26,13 +34,21 @@ from axonflow.api.routes import (
 from axonflow.api.ws import broadcaster
 from axonflow.config.loader import load_global_config
 from axonflow.engine import AxonFlowEngine
+from axonflow.media.jobs import RenderJobRunner
+from axonflow.media.storage import LocalMediaStorage
 from axonflow.observability.execution_log import ExecutionLogEntry
 from axonflow.platform.store import PlatformStore
 
 logger = structlog.get_logger()
 
 
-def _make_log_callback(loop: asyncio.AbstractEventLoop):
+_RUN_EVENT_ACTIONS = {"agent_retry", "tool_error", "llm_error", "skill_error"}
+
+
+def _make_log_callback(
+    loop: asyncio.AbstractEventLoop,
+    platform_store: PlatformStore,
+):
     """创建一个将 ExecutionLogEntry 转发到 WebSocket broadcaster 的回调"""
 
     def _on_log(entry: ExecutionLogEntry, run_id: str | None) -> None:
@@ -41,7 +57,8 @@ def _make_log_callback(loop: asyncio.AbstractEventLoop):
         event = {
             "type": f"execution.{entry.action}",
             "workflow_id": entry.workflow_id,
-            "run_id": run_id,
+            "run_id": entry.run_id or run_id,
+            "execution_id": entry.execution_id,
             "timestamp": entry.timestamp,
             "data": {
                 "agent_id": entry.agent_id,
@@ -53,6 +70,13 @@ def _make_log_callback(loop: asyncio.AbstractEventLoop):
                 "round": entry.round,
             },
         }
+        if entry.action in _RUN_EVENT_ACTIONS:
+            platform_store.record_event(
+                run_id,
+                event["type"],
+                event["data"],
+                entry.timestamp,
+            )
         asyncio.run_coroutine_threadsafe(broadcaster.broadcast(run_id, event), loop)
 
     return _on_log
@@ -70,6 +94,11 @@ async def lifespan(app: FastAPI):
         workspace_dir = config_dir.parent / workspace_dir
     platform_store = PlatformStore(workspace_dir / "axonflow.db")
     set_platform_store(platform_store)
+    media_storage = LocalMediaStorage(workspace_dir / "media")
+    set_media_storage(media_storage)
+    render_job_runner = RenderJobRunner(platform_store, media_storage)
+    render_job_runner.recover_interrupted()
+    set_render_job_runner(render_job_runner)
 
     engine = AxonFlowEngine(
         config_dir=str(config_dir),
@@ -83,12 +112,13 @@ async def lifespan(app: FastAPI):
     # Wire ExecutionLogger -> WebSocket broadcaster
     if engine._execution_logger is not None:
         loop = asyncio.get_running_loop()
-        log_callback = _make_log_callback(loop)
+        log_callback = _make_log_callback(loop, platform_store)
         engine._execution_logger.add_callback(log_callback)
 
     logger.info("api.started", config_dir=str(config_dir))
     yield
 
+    await render_job_runner.shutdown()
     await engine.stop()
     platform_store.close()
     logger.info("api.stopped")
@@ -115,6 +145,8 @@ def create_app(config_dir: str = "config") -> FastAPI:
 
     # 注册路由
     app.include_router(system.router)
+    app.include_router(assets.router)
+    app.include_router(render_jobs.router)
     app.include_router(workflows.router)
     app.include_router(agents.router)
     app.include_router(logs.router)

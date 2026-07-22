@@ -1,0 +1,9 @@
+agent:
+  id: agent-video-ingest
+  name: "影视资源导入器"
+  role: "导入用户有权处理的本地视频或目标链接，并验证媒体元数据。"
+  agent_type: custom
+  class_path: axonflow.agents.video_edit.VideoIngestAgent
+  tools: [video_ingest]
+  retry_limit: 1
+  memory: {enabled: false}

@@ -1,0 +1,13 @@
+agent:
+  id: agent-video-transcription
+  name: "源视频语音转写器"
+  role: "使用本地 whisper.cpp 将剪辑后的真实对白转成带时间码的 SRT 字幕。"
+  agent_type: custom
+  class_path: axonflow.agents.video_edit.VideoTranscriptionAgent
+  tools: [video_transcribe, subtitle_create]
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    transcription:
+      language: auto
+      timeout: 3600

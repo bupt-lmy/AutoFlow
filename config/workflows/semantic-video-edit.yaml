@@ -1,0 +1,84 @@
+workflow:
+  id: semantic-video-edit
+  name: "影视语义精彩片段剪辑"
+  trigger:
+    type: manual
+  agents:
+    - agent-video-ingest
+    - agent-video-scene-analysis
+    - agent-video-scene-features
+    - agent-source-transcript
+    - agent-video-highlight-scoring
+    - agent-video-highlight-selector
+    - agent-video-interval-refiner
+    - agent-video-highlight-renderer
+    - agent-video-transcription
+    - agent-hard-subtitle
+    - agent-media-quality
+    - agent-media-asset-register
+  flow:
+    mode: flat
+    entry: agent-video-ingest
+    max_iterations: 15
+    timeout: 7200
+    routes:
+      agent-video-ingest:
+        - target: agent-video-scene-analysis
+          condition: {field: status, operator: eq, value: success}
+      agent-video-scene-analysis:
+        - target: agent-video-scene-features
+          condition: {field: status, operator: eq, value: success}
+        - target: agent-source-transcript
+          condition: {field: status, operator: eq, value: success}
+      agent-video-scene-features:
+        - target: agent-video-highlight-scoring
+          condition: {field: status, operator: eq, value: success}
+      agent-source-transcript:
+        - target: agent-video-highlight-scoring
+          condition: {field: status, operator: eq, value: success}
+      agent-video-highlight-scoring:
+        - target: agent-video-highlight-selector
+          condition: {field: status, operator: eq, value: success}
+      agent-video-highlight-selector:
+        - target: agent-video-interval-refiner
+          condition: {field: status, operator: eq, value: success}
+      agent-video-interval-refiner:
+        - target: agent-video-highlight-renderer
+          condition: {field: status, operator: eq, value: success}
+      agent-video-highlight-renderer:
+        - target: agent-video-transcription
+          condition: {field: status, operator: eq, value: success}
+      agent-video-transcription:
+        - target: agent-hard-subtitle
+          condition: {field: status, operator: eq, value: success}
+      agent-hard-subtitle:
+        - target: agent-media-quality
+          condition: {field: status, operator: eq, value: success}
+      agent-media-quality:
+        - target: agent-media-asset-register
+          condition: {field: status, operator: eq, value: success}
+    terminate_on:
+      - {agent: agent-media-asset-register, status: success}
+      - {agent: agent-video-ingest, status: error}
+      - {agent: agent-video-scene-analysis, status: error}
+      - {agent: agent-video-scene-features, status: error}
+      - {agent: agent-source-transcript, status: error}
+      - {agent: agent-video-highlight-scoring, status: error}
+      - {agent: agent-video-highlight-selector, status: error}
+      - {agent: agent-video-interval-refiner, status: error}
+      - {agent: agent-video-highlight-renderer, status: error}
+      - {agent: agent-video-transcription, status: error}
+      - {agent: agent-hard-subtitle, status: error}
+      - {agent: agent-media-quality, status: error}
+      - {agent: agent-media-asset-register, status: error}
+    join:
+      agent-video-highlight-scoring:
+        wait_for: [agent-video-scene-features, agent-source-transcript]
+        strategy: all
+  context:
+    input_contract:
+      source: "本地视频路径或可访问链接"
+      description: "要查找和剪辑的内容描述"
+      target_duration_seconds: 30
+      hard_subtitles: true
+    output: "经多帧/运动/音频综合评分与帧级精修、保留源动作和原声的 H.264/AAC 成片"

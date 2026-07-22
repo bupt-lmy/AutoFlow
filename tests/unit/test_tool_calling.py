@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from axonflow.config.models import ModelConfig
+from axonflow.config.models import AgentConfig, ModelConfig
+from axonflow.core.agent import BaseAgent
+from axonflow.core.message import Message, MessageType
 from axonflow.llm.gateway import LLMGateway, LLMResponse
+from axonflow.messaging.memory_bus import InMemoryMessageBus
+from axonflow.observability.execution_log import ExecutionLogger
 from axonflow.tools.base import ToolRegistry, ToolResult
 
 
@@ -28,6 +33,27 @@ class TestLLMResponseToolCalls:
         assert resp.tool_calls is not None
         assert len(resp.tool_calls) == 1
         assert resp.tool_calls[0]["function"]["name"] == "shell_exec"
+
+    def test_gateway_normalizes_provider_native_tool_call_dict(self):
+        normalized = LLMGateway._normalize_tool_call(
+            {
+                "id": "call-native-1",
+                "type": "function",
+                "function": {
+                    "name": "file_read",
+                    "arguments": '{"path":"README.md"}',
+                },
+            }
+        )
+
+        assert normalized == {
+            "id": "call-native-1",
+            "type": "function",
+            "function": {
+                "name": "file_read",
+                "arguments": '{"path":"README.md"}',
+            },
+        }
 
 
 class TestGatewayThinkingModelCompat:
@@ -246,15 +272,6 @@ class TestToolRegistryExecute:
 # Tool Calling Loop 集成测试
 # ============================================================
 
-import json
-
-from axonflow.config.models import AgentConfig, ModelConfig
-from axonflow.core.agent import BaseAgent, create_agent
-from axonflow.core.message import Message, MessageType
-from axonflow.messaging.memory_bus import InMemoryMessageBus
-from axonflow.observability.execution_log import ExecutionLogger
-
-
 def _make_message(task: str = "test task") -> Message:
     return Message(
         sender="user",
@@ -279,11 +296,54 @@ def _make_agent_config(**overrides) -> AgentConfig:
 
 class TestToolCallingLoop:
     @pytest.mark.asyncio
-    async def test_single_tool_call_then_text(self):
+    async def test_configured_tool_round_limit_allows_complex_agent(self):
+        bus = InMemoryMessageBus()
+        registry = ToolRegistry()
+        mock_tool = MagicMock()
+        mock_tool.name = "shell_exec"
+        mock_tool.to_schema.return_value = {
+            "type": "function",
+            "function": {"name": "shell_exec", "parameters": {}},
+        }
+        mock_tool.execute = AsyncMock(return_value=ToolResult(success=True, output="ok"))
+        registry.register(mock_tool)
+
+        gateway = MagicMock()
+        gateway.chat = AsyncMock(
+            side_effect=[
+                LLMResponse(
+                    content="",
+                    model="test",
+                    tool_calls=[
+                        {
+                            "id": f"call-{index}",
+                            "type": "function",
+                            "function": {
+                                "name": "shell_exec",
+                                "arguments": '{"command":"true"}',
+                            },
+                        }
+                    ],
+                )
+                for index in range(11)
+            ]
+            + [LLMResponse(content="done", model="test")]
+        )
+        config = _make_agent_config(parameters={"max_tool_rounds": 12})
+        agent = BaseAgent(config, bus, gateway, registry)
+
+        result = await agent.handle_message(_make_message())
+
+        assert result["status"] == "success"
+        assert result["content"] == "done"
+        assert gateway.chat.await_count == 12
+
+    @pytest.mark.asyncio
+    async def test_single_tool_call_then_text(self, tmp_path):
         """LLM 先返回 tool_call，执行后 LLM 返回 text → 成功"""
         bus = InMemoryMessageBus()
         registry = ToolRegistry()
-        exec_logger = ExecutionLogger(workspace_dir="/tmp/test-tc-loop")
+        exec_logger = ExecutionLogger(workspace_dir=str(tmp_path))
 
         mock_tool = MagicMock()
         mock_tool.name = "shell_exec"
@@ -342,11 +402,11 @@ class TestToolCallingLoop:
         assert len(entries) == 1
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_error_fed_back(self):
+    async def test_unknown_tool_error_fed_back(self, tmp_path):
         """LLM 请求不存在的工具 → error 回填给 LLM → LLM 产出 text"""
         bus = InMemoryMessageBus()
         registry = ToolRegistry()
-        exec_logger = ExecutionLogger(workspace_dir="/tmp/test-tc-unknown")
+        exec_logger = ExecutionLogger(workspace_dir=str(tmp_path))
 
         gateway = MagicMock()
 
@@ -380,11 +440,11 @@ class TestToolCallingLoop:
         assert len(entries) == 1
 
     @pytest.mark.asyncio
-    async def test_json_parse_error_fed_back(self):
+    async def test_json_parse_error_fed_back(self, tmp_path):
         """LLM 返回无效 JSON 参数 → error 回填 → LLM 纠正"""
         bus = InMemoryMessageBus()
         registry = ToolRegistry()
-        exec_logger = ExecutionLogger(workspace_dir="/tmp/test-tc-json")
+        exec_logger = ExecutionLogger(workspace_dir=str(tmp_path))
 
         mock_tool = MagicMock()
         mock_tool.name = "shell_exec"
@@ -431,11 +491,11 @@ class TestToolCallingLoop:
         assert len(entries) == 1
 
     @pytest.mark.asyncio
-    async def test_max_rounds_exceeded(self):
+    async def test_max_rounds_exceeded(self, tmp_path):
         """10 轮 tool_calls 后仍无 content → 返回 error"""
         bus = InMemoryMessageBus()
         registry = ToolRegistry()
-        exec_logger = ExecutionLogger(workspace_dir="/tmp/test-tc-max")
+        exec_logger = ExecutionLogger(workspace_dir=str(tmp_path))
 
         mock_tool = MagicMock()
         mock_tool.name = "shell_exec"
@@ -473,16 +533,35 @@ class TestToolCallingLoop:
             execution_logger=exec_logger,
         )
 
-        result = await agent.handle_message(_make_message())
+        message = _make_message("x" * 250)
+        result = await agent.handle_message(message)
         assert result["status"] == "error"
         assert "exceeded" in result["error"].lower() or "rounds" in result["error"].lower()
 
+        entry = exec_logger.get_entries(action="tool_error")[-1]
+        assert entry.action == "tool_error"
+        assert entry.tool_name is None
+        assert entry.message_id == message.id
+        assert isinstance(entry.task_preview, str)
+        assert len(entry.task_preview) == 200
+        assert entry.rounds_used == 10
+        assert entry.last_tool_name == "shell_exec"
+        assert entry.last_tool_arguments == '{"command": "echo loop"}'
+
+        log_file = tmp_path / "logs" / "execution-wf-test.jsonl"
+        persisted = json.loads(log_file.read_text().splitlines()[-1])
+        assert persisted["message_id"] == message.id
+        assert persisted["task_preview"] == entry.task_preview
+        assert persisted["rounds_used"] == 10
+        assert persisted["last_tool_name"] == "shell_exec"
+        assert persisted["last_tool_arguments"] == '{"command": "echo loop"}'
+
     @pytest.mark.asyncio
-    async def test_no_tool_calls_no_content_retries(self):
+    async def test_no_tool_calls_no_content_retries(self, tmp_path):
         """LLM 返回空（无 content 无 tool_calls）→ 重试 → 最终有 content"""
         bus = InMemoryMessageBus()
         registry = ToolRegistry()
-        exec_logger = ExecutionLogger(workspace_dir="/tmp/test-tc-empty")
+        exec_logger = ExecutionLogger(workspace_dir=str(tmp_path))
 
         gateway = MagicMock()
 
@@ -502,3 +581,69 @@ class TestToolCallingLoop:
         result = await agent.handle_message(_make_message())
         assert result["status"] == "success"
         assert gateway.chat.call_count == 2
+
+
+class TestBaseAgent:
+    @pytest.mark.asyncio
+    async def test_internal_retry_is_written_as_run_visible_execution_event(self, tmp_path):
+        exec_logger = ExecutionLogger(workspace_dir=str(tmp_path))
+        agent = BaseAgent(
+            config=_make_agent_config(retry_limit=2),
+            message_bus=InMemoryMessageBus(),
+            llm_gateway=MagicMock(),
+            tool_registry=ToolRegistry(),
+            execution_logger=exec_logger,
+        )
+        agent.handle_message = AsyncMock(
+            side_effect=[RuntimeError("temporary model outage"), {"status": "success"}]
+        )
+        message = _make_message("retry this task")
+
+        with patch("axonflow.core.agent.asyncio.sleep", new_callable=AsyncMock):
+            result = await agent._process_with_retry(message)
+
+        assert result == {"status": "success"}
+        retry = exec_logger.get_entries(action="agent_retry")[-1]
+        assert retry.agent_id == "test-agent"
+        assert retry.error == "temporary model outage"
+        assert retry.arguments == {
+            "failed_attempt": 1,
+            "next_attempt": 2,
+            "max_attempts": 2,
+        }
+        assert retry.task_preview == "retry this task"
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_writes_recoverable_entry(self, tmp_path):
+        bus = InMemoryMessageBus()
+        gateway = MagicMock()
+        gateway.chat = AsyncMock(return_value=LLMResponse(content="", model="test-model"))
+        exec_logger = ExecutionLogger(workspace_dir=str(tmp_path))
+        agent = BaseAgent(
+            config=_make_agent_config(parameters={"max_tool_rounds": 1}),
+            message_bus=bus,
+            llm_gateway=gateway,
+            tool_registry=ToolRegistry(),
+            execution_logger=exec_logger,
+        )
+        message = Message(
+            sender="user",
+            receiver="test-agent",
+            type=MessageType.TASK_REQUEST,
+            payload={"content": "fallback task preview"},
+            workflow_id="wf-no-tool",
+        )
+
+        result = await agent.handle_message(message)
+
+        assert result["status"] == "error"
+        entry = exec_logger.get_entries(action="tool_error")[-1]
+        assert entry.message_id == message.id
+        assert entry.task_preview == "fallback task preview"
+        assert entry.rounds_used == 1
+        assert entry.last_tool_name is None
+        assert entry.last_tool_arguments is None
+        log_file = tmp_path / "logs" / "execution-wf-no-tool.jsonl"
+        persisted = json.loads(log_file.read_text())
+        assert persisted["last_tool_name"] is None
+        assert persisted["last_tool_arguments"] is None

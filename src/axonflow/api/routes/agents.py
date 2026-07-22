@@ -38,10 +38,17 @@ class AgentCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     role: str = Field(default="", max_length=4000)
     model_profile_id: str | None = None
-    agent_type: Literal["base", "remote"] = "base"
+    agent_type: Literal["base", "remote", "codex"] = "base"
     remote_endpoint: str | None = None
     remote_credential_id: str | None = None
     remote_api_key_env: str | None = None
+    codex_working_directory: str | None = None
+    codex_model: str | None = None
+    codex_profile: str | None = None
+    codex_sandbox: Literal["read-only", "workspace-write"] = "workspace-write"
+    codex_timeout_seconds: int = Field(default=1800, ge=30, le=86400)
+    codex_health_check: Literal["exec", "auth", "binary"] = "exec"
+    codex_skip_git_repo_check: bool = False
 
 
 class ModelProfileSelectionRequest(BaseModel):
@@ -79,11 +86,26 @@ async def list_agents():
 
 @router.get("/manifests")
 async def list_agent_manifests():
-    """Return the stable Agent Library representation for visual workflows."""
+    """Return Agent Library manifests annotated with live readiness state."""
     config_dir = get_config_dir()
     configs = load_all_agent_configs(config_dir / "agents")
     manifests = map(AgentManifest.from_agent_config, configs)
-    return [manifest.model_dump(mode="json") for manifest in manifests]
+    health_by_agent = get_engine().agent_registry.get_health()
+    unknown_health = {
+        "state": "unknown",
+        "ready": False,
+        "last_checked_at": None,
+        "last_success_at": None,
+        "latency_ms": None,
+        "error": None,
+    }
+    return [
+        {
+            **manifest.model_dump(mode="json"),
+            "health": health_by_agent.get(manifest.id, unknown_health),
+        }
+        for manifest in manifests
+    ]
 
 
 @router.get("/catalog/tools")
@@ -105,11 +127,26 @@ async def list_skill_catalog() -> list[dict]:
     skills_dir = get_config_dir() / "skills"
     if not skills_dir.exists():
         return []
-    return [
-        {"id": path.name, "has_scripts": (path / "scripts").is_dir()}
-        for path in sorted(skills_dir.iterdir(), key=lambda item: item.name)
-        if path.is_dir() and (path / "SKILL.md").exists()
-    ]
+    catalog = []
+    for path in sorted(skills_dir.iterdir(), key=lambda item: item.name):
+        if not path.is_dir() or not (path / "SKILL.md").exists():
+            continue
+        components = [
+            name
+            for name in ("scripts", "references", "assets")
+            if (path / name).is_dir()
+        ]
+        catalog.append(
+            {
+                "id": path.name,
+                "has_scripts": "scripts" in components,
+                "has_references": "references" in components,
+                "has_assets": "assets" in components,
+                "components": components,
+                "file_count": sum(1 for item in path.rglob("*") if item.is_file()),
+            }
+        )
+    return catalog
 
 
 @router.post("", status_code=201)
@@ -136,6 +173,13 @@ async def create_agent(body: AgentCreateRequest) -> dict:
             status_code=422,
             detail="Remote endpoint is required for a Remote Agent",
         )
+    if body.agent_type == "codex" and not (
+        body.codex_working_directory and body.codex_working_directory.strip()
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Working directory is required for a Codex Agent",
+        )
     if (
         body.remote_credential_id
         and not get_platform_store().get_credential(body.remote_credential_id)
@@ -151,12 +195,40 @@ async def create_agent(body: AgentCreateRequest) -> dict:
             **({"credential_id": body.remote_credential_id} if body.remote_credential_id else {}),
             **({"api_key_env": body.remote_api_key_env} if body.remote_api_key_env else {}),
         }
+    if body.agent_type == "codex":
+        working_directory = str(Path(body.codex_working_directory or ".").expanduser().resolve())
+        if not Path(working_directory).is_dir():
+            raise HTTPException(status_code=422, detail="Codex working directory does not exist")
+        parameters["codex"] = {
+            "command": "codex",
+            "working_directory": working_directory,
+            "allowed_working_directories": [working_directory],
+            "allow_dynamic_working_directory": False,
+            "sandbox": body.codex_sandbox,
+            "timeout_seconds": body.codex_timeout_seconds,
+            "health_check": body.codex_health_check,
+            "health_timeout_seconds": 60,
+            "ephemeral": True,
+            "skip_git_repo_check": body.codex_skip_git_repo_check,
+            **({"model": body.codex_model.strip()} if body.codex_model else {}),
+            **({"profile": body.codex_profile.strip()} if body.codex_profile else {}),
+        }
     config = AgentConfig(
         id=body.id,
         name=body.name.strip(),
         role=body.role.strip(),
         agent_type=body.agent_type,
-        model=ModelConfig.model_validate(profile["config"]) if profile else ModelConfig(),
+        model=(
+            ModelConfig.model_validate(profile["config"])
+            if profile
+            else ModelConfig(
+                provider="codex",
+                name=body.codex_model.strip() if body.codex_model else "configured-default",
+                temperature=0,
+            )
+            if body.agent_type == "codex"
+            else ModelConfig()
+        ),
         parameters=parameters,
     )
     agents_dir.mkdir(parents=True, exist_ok=True)
@@ -195,6 +267,21 @@ async def get_agent(agent_id: str):
                     result["raw_yaml"] = agent_path.read_text(encoding="utf-8")
             return result
     raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+
+
+@router.post("/health-check")
+async def check_all_agent_health() -> dict[str, dict]:
+    """Immediately probe every registered Agent concurrently."""
+    return await get_engine().check_agent_health()
+
+
+@router.post("/{agent_id}/health-check")
+async def check_agent_health(agent_id: str) -> dict:
+    """Immediately probe an Agent's configured model or remote endpoint."""
+    engine = get_engine()
+    if engine.agent_registry.get(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+    return (await engine.check_agent_health(agent_id))[agent_id]
 
 
 @router.put("/{agent_id}")

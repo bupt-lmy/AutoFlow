@@ -45,9 +45,15 @@ async def list_spans(
     run_id: str | None = Query(None),
     workflow_id: str | None = Query(None),
     agent_id: str | None = Query(None),
+    trace_kind: str | None = Query(None),
+    exclude_trace_kind: str | None = Query(None),
+    attributed_only: bool = Query(False),
 ) -> list[dict]:
     return get_platform_store().list_llm_spans(
         run_id=run_id,
         workflow_id=workflow_id,
         agent_id=agent_id,
+        trace_kind=trace_kind,
+        exclude_trace_kind=exclude_trace_kind,
+        attributed_only=attributed_only,
     )

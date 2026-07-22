@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -20,11 +21,26 @@ app = typer.Typer(
 console = Console()
 
 
-def _get_engine():
-    """懒加载引擎实例"""
+def _get_engine(config_dir: str = "config"):
+    """Create a CLI engine with the same encrypted credential store as the API."""
+    from axonflow.config.loader import load_global_config
     from axonflow.engine import AxonFlowEngine
+    from axonflow.platform.store import PlatformStore
 
-    return AxonFlowEngine()
+    config_path = Path(config_dir)
+    config = load_global_config(config_path / "axonflow.yaml")
+    workspace_dir = Path(config.workspace_dir)
+    if not workspace_dir.is_absolute():
+        workspace_dir = config_path.parent / workspace_dir
+    platform_store = PlatformStore(workspace_dir / "axonflow.db")
+    return (
+        AxonFlowEngine(
+            config_dir=config_dir,
+            config=config,
+            platform_store=platform_store,
+        ),
+        platform_store,
+    )
 
 
 @app.command()
@@ -33,9 +49,7 @@ def start(
     config_dir: str = typer.Option("config", "--config", "-c", help="配置目录路径"),
 ) -> None:
     """启动 AxonFlow 引擎"""
-    from axonflow.engine import AxonFlowEngine
-
-    engine = AxonFlowEngine(config_dir=config_dir)
+    engine, platform_store = _get_engine(config_dir)
 
     console.print(f"[bold green]AxonFlow v{__version__}[/bold green]")
     console.print("Starting engine...")
@@ -51,6 +65,7 @@ def start(
             pass
         finally:
             await engine.stop()
+            platform_store.close()
 
     try:
         asyncio.run(_run())
@@ -65,25 +80,25 @@ def run(
     config_dir: str = typer.Option("config", "--config", "-c", help="配置目录路径"),
 ) -> None:
     """执行指定工作流"""
-    from axonflow.engine import AxonFlowEngine
-
-    engine = AxonFlowEngine(config_dir=config_dir)
+    engine, platform_store = _get_engine(config_dir)
 
     async def _run():
-        await engine.initialize()
+        try:
+            await engine.initialize()
 
-        # 启动 Agent 监听
-        await engine.start()
+            # 启动 Agent 监听
+            await engine.start()
 
-        # 执行工作流
-        console.print(f"Running workflow: [bold]{workflow}[/bold]")
-        result = await engine.run_workflow(workflow, input_data)
+            # 执行工作流
+            console.print(f"Running workflow: [bold]{workflow}[/bold]")
+            result = await engine.run_workflow(workflow, input_data)
 
-        # 输出结果
-        console.print("\n[bold]Workflow Result:[/bold]")
-        console.print_json(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
-
-        await engine.stop()
+            # 输出结果
+            console.print("\n[bold]Workflow Result:[/bold]")
+            console.print_json(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        finally:
+            await engine.stop()
+            platform_store.close()
 
     try:
         asyncio.run(_run())
@@ -91,7 +106,7 @@ def run(
         console.print("\n[yellow]Cancelled.[/yellow]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from e
 
 
 @app.command()
@@ -99,8 +114,9 @@ def status(
     config_dir: str = typer.Option("config", "--config", "-c", help="配置目录路径"),
 ) -> None:
     """查看系统状态"""
-    from axonflow.config.loader import load_all_agent_configs, load_all_workflow_configs
     from pathlib import Path
+
+    from axonflow.config.loader import load_all_agent_configs, load_all_workflow_configs
 
     config_path = Path(config_dir)
 

@@ -36,6 +36,27 @@ class TestPromptBuilder:
         assert messages[1]["role"] == "user"
         assert "hello world" in messages[1]["content"]
 
+    def test_build_includes_complete_structured_upstream_payload(self):
+        message = _make_message()
+        message.payload.update(
+            {
+                "files_changed": ["src/app.py"],
+                "tests": [{"command": "pytest -q", "status": "passed"}],
+                "artifacts": [{"uri": "src/app.py"}],
+            }
+        )
+
+        messages = PromptBuilder.build(
+            agent_config=_make_config(),
+            incoming_message=message,
+        )
+
+        user_content = messages[-1]["content"]
+        assert "完整上游结构化数据" in user_content
+        assert "files_changed" in user_content
+        assert "pytest -q" in user_content
+        assert "src/app.py" in user_content
+
     def test_build_includes_role(self):
         messages = PromptBuilder.build(
             agent_config=_make_config(),
@@ -59,6 +80,33 @@ class TestPromptBuilder:
 
         assert "当前工作流职责" in messages[0]["content"]
         assert "只负责核查事实" in messages[0]["content"]
+
+    def test_build_includes_runtime_discovery_protocol(self):
+        message = _make_message()
+        message.session_id = "session-1"
+        message.task_id = "task-1"
+        message.payload["_protocol"] = {
+            "version": "aip-lite/0.1",
+            "session_id": "session-1",
+            "task_id": "task-1",
+            "requested_capability": "执行安全代码评审",
+            "selected_agent": "security-reviewer",
+            "attempt": 2,
+            "command": {"command": "start"},
+            "previous_attempts": [{"agent_id": "reviewer-1", "status": "timeout"}],
+        }
+
+        messages = PromptBuilder.build(
+            agent_config=_make_config(),
+            incoming_message=message,
+        )
+
+        system_content = messages[0]["content"]
+        assert "任务协作协议" in system_content
+        assert "security-reviewer" in system_content
+        assert "任务指令: start" in system_content
+        assert "reviewer-1" in system_content
+        assert "证据、产物和失败原因" in system_content
 
     def test_build_with_no_memories(self):
         messages = PromptBuilder.build(

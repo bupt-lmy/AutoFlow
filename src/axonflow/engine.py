@@ -6,18 +6,20 @@ import asyncio
 import importlib
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import structlog
 
+from axonflow.agents.discovered import DiscoveredAgent
 from axonflow.config.loader import (
     load_all_agent_configs,
     load_all_workflow_configs,
     load_global_config,
 )
 from axonflow.config.models import AgentConfig, AxonFlowConfig, ModelConfig, Route, WorkflowConfig
-from axonflow.core.agent import AgentRegistry, create_agent
+from axonflow.core.agent import AgentHealthState, AgentRegistry, create_agent
 from axonflow.core.orchestrator_factory import create_orchestrator
 from axonflow.core.scheduler import Scheduler
 from axonflow.core.workflow import WorkflowResult
@@ -27,6 +29,7 @@ from axonflow.messaging.base import MessageBus
 from axonflow.messaging.memory_bus import InMemoryMessageBus
 from axonflow.observability.execution_log import ExecutionLogger
 from axonflow.observability.logger import setup_logging
+from axonflow.platform.models import PlatformWorkflow
 from axonflow.platform.store import PlatformStore
 from axonflow.tools.archive_ops import ArchiveOpsTool
 from axonflow.tools.base import Tool, ToolRegistry
@@ -34,13 +37,35 @@ from axonflow.tools.directory_tree import DirectoryTreeTool
 from axonflow.tools.env_vars import EnvVarsTool
 from axonflow.tools.file_ops import FileReadTool, FileWriteTool
 from axonflow.tools.file_patch import FilePatchTool
+from axonflow.tools.generated_video import GeneratedVideoFinalizeTool
 from axonflow.tools.git_ops import GitOpsTool
 from axonflow.tools.http_request import HttpRequestTool
 from axonflow.tools.json_query import JsonQueryTool
+from axonflow.tools.media_compose import MediaComposeTool
+from axonflow.tools.media_probe import MediaProbeTool
+from axonflow.tools.media_quality import MediaQualityCheckTool
+from axonflow.tools.media_register import MediaRegisterTool
+from axonflow.tools.media_render import MediaRenderTool
+from axonflow.tools.minimax_media import (
+    MiniMaxImageGenerateTool,
+    MiniMaxMusicGenerateTool,
+    MiniMaxSpeechGenerateTool,
+    MiniMaxVideoGenerateTool,
+)
 from axonflow.tools.process_manager import ProcessManagerTool
 from axonflow.tools.python_eval import PythonEvalTool
 from axonflow.tools.shell_exec import ShellExecTool
+from axonflow.tools.storyboard_video import StoryboardMotionRenderTool
+from axonflow.tools.subtitle_create import SubtitleCreateTool
 from axonflow.tools.text_search import TextSearchTool
+from axonflow.tools.video_edit import (
+    HardSubtitleBurnTool,
+    HighlightRenderTool,
+    VideoIngestTool,
+    VideoSceneDetectTool,
+    VideoTranscribeTool,
+)
+from axonflow.tools.video_features import VideoSceneFeatureTool
 from axonflow.tools.web_scrape import WebScrapeTool
 from axonflow.tools.web_search import WebSearchTool
 
@@ -140,6 +165,9 @@ class AxonFlowEngine:
         # 5.6 初始化执行日志
         self._execution_logger = ExecutionLogger(
             workspace_dir=self.config.workspace_dir,
+            run_contexts=(
+                self._platform_store.list_execution_contexts() if self._platform_store else None
+            ),
         )
 
         # 6. 加载并注册 Agent
@@ -212,6 +240,78 @@ class AxonFlowEngine:
         self._tool_registry.register(EnvVarsTool())
         self._tool_registry.register(ArchiveOpsTool())
         self._tool_registry.register(ProcessManagerTool())
+        self._tool_registry.register(MediaProbeTool())
+        self._tool_registry.register(MediaRenderTool())
+        workspace_dir = Path(self.config.workspace_dir)
+        if not workspace_dir.is_absolute():
+            workspace_dir = self._config_dir.parent / workspace_dir
+        self._tool_registry.register(
+            MediaComposeTool(output_dir=workspace_dir / "media" / "composed")
+        )
+        self._tool_registry.register(MediaQualityCheckTool())
+        self._tool_registry.register(MediaRegisterTool(self._platform_store))
+        self._tool_registry.register(
+            SubtitleCreateTool(output_dir=workspace_dir / "media" / "subtitles")
+        )
+        self._tool_registry.register(
+            VideoIngestTool(output_dir=workspace_dir / "media" / "imports")
+        )
+        self._tool_registry.register(
+            VideoSceneDetectTool(output_dir=workspace_dir / "media" / "keyframes")
+        )
+        self._tool_registry.register(
+            VideoSceneFeatureTool(output_dir=workspace_dir / "media" / "scene-features")
+        )
+        self._tool_registry.register(
+            HighlightRenderTool(output_dir=workspace_dir / "media" / "highlights")
+        )
+        self._tool_registry.register(
+            VideoTranscribeTool(
+                model_path=workspace_dir / "models" / "ggml-small.bin",
+                output_dir=workspace_dir / "media" / "transcripts",
+            )
+        )
+        self._tool_registry.register(
+            HardSubtitleBurnTool(output_dir=workspace_dir / "media" / "final")
+        )
+        self._tool_registry.register(
+            GeneratedVideoFinalizeTool(output_dir=workspace_dir / "media" / "generated-final")
+        )
+        self._tool_registry.register(
+            StoryboardMotionRenderTool(output_dir=workspace_dir / "media" / "storyboards")
+        )
+        self._tool_registry.register(
+            MiniMaxImageGenerateTool(
+                output_dir=workspace_dir / "media" / "generated",
+                credential_resolver=(
+                    self._platform_store.resolve_credential if self._platform_store else None
+                ),
+            )
+        )
+        self._tool_registry.register(
+            MiniMaxSpeechGenerateTool(
+                output_dir=workspace_dir / "media" / "generated",
+                credential_resolver=(
+                    self._platform_store.resolve_credential if self._platform_store else None
+                ),
+            )
+        )
+        self._tool_registry.register(
+            MiniMaxMusicGenerateTool(
+                output_dir=workspace_dir / "media" / "generated",
+                credential_resolver=(
+                    self._platform_store.resolve_credential if self._platform_store else None
+                ),
+            )
+        )
+        self._tool_registry.register(
+            MiniMaxVideoGenerateTool(
+                output_dir=workspace_dir / "media" / "generated",
+                credential_resolver=(
+                    self._platform_store.resolve_credential if self._platform_store else None
+                ),
+            )
+        )
 
     def _load_plugin_tools(self) -> None:
         """加载外部工具插件"""
@@ -286,6 +386,8 @@ class AxonFlowEngine:
         self._agent_registry.register(agent)
         if start_immediately and self._running:
             self._agent_tasks.append(asyncio.create_task(agent.start()))
+            if self.config.agent_health.enabled:
+                await agent.check_health(self.config.agent_health.timeout_seconds)
 
     def _load_cron_jobs(self) -> None:
         """从工作流配置中加载 Cron 任务"""
@@ -298,7 +400,23 @@ class AxonFlowEngine:
                 self._scheduler.add_job(
                     workflow_id=wf.id,
                     cron_expr=wf.trigger.cron,
+                    input_data=wf.trigger.input,
+                    timezone=wf.trigger.timezone,
                 )
+
+    def sync_workflow_schedule(self, workflow: WorkflowConfig) -> None:
+        """Apply a saved workflow trigger to the live scheduler immediately."""
+        if self._scheduler is None:
+            return
+        if workflow.trigger.type == "cron" and workflow.trigger.cron:
+            self._scheduler.upsert_job(
+                workflow_id=workflow.id,
+                cron_expr=workflow.trigger.cron,
+                input_data=workflow.trigger.input,
+                timezone=workflow.trigger.timezone,
+            )
+        else:
+            self._scheduler.remove_job(workflow.id)
 
     async def start(self) -> None:
         """启动引擎 — 启动所有 Agent 和调度器"""
@@ -314,6 +432,11 @@ class AxonFlowEngine:
             task = asyncio.create_task(agent.start())
             self._agent_tasks.append(task)
 
+        if self.config.agent_health.enabled:
+            await self.check_agent_health()
+            health_task = asyncio.create_task(self._health_monitor())
+            self._agent_tasks.append(health_task)
+
         # 启动调度器
         assert self._scheduler is not None
         scheduler_task = asyncio.create_task(self._scheduler.start())
@@ -323,6 +446,37 @@ class AxonFlowEngine:
             "engine.started",
             agents=len(self._agent_registry.list_agents()),
         )
+
+    async def check_agent_health(self, agent_id: str | None = None) -> dict[str, dict]:
+        """Probe one or all registered Agents concurrently."""
+        if self._agent_registry is None:
+            return {}
+        if agent_id is not None:
+            agent = self._agent_registry.get(agent_id)
+            if agent is None:
+                raise ValueError(f"Agent not found: {agent_id}")
+            agents = [agent]
+        else:
+            agents = self._agent_registry.list_agents()
+        if not agents:
+            return {}
+        results = await asyncio.gather(
+            *(agent.check_health(self.config.agent_health.timeout_seconds) for agent in agents)
+        )
+        return {agent.id: result for agent, result in zip(agents, results, strict=True)}
+
+    async def _health_monitor(self) -> None:
+        """Periodically refresh actual Agent endpoint/model readiness."""
+        interval = self.config.agent_health.interval_seconds
+        logger.info("agent_health.monitor_started", interval_seconds=interval)
+        try:
+            while self._running:
+                await asyncio.sleep(interval)
+                if self._running:
+                    await self.check_agent_health()
+        except asyncio.CancelledError:
+            logger.info("agent_health.monitor_stopped")
+            raise
 
     async def stop(self) -> None:
         """停止引擎"""
@@ -356,6 +510,7 @@ class AxonFlowEngine:
         workflow_id: str,
         input_data: str,
         event_callback: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        run_id: str | None = None,
     ) -> WorkflowResult:
         """执行指定工作流"""
         workflows_dir = self._config_dir / "workflows"
@@ -383,6 +538,7 @@ class AxonFlowEngine:
             message_bus=self._message_bus,
             llm_gateway=self._llm_gateway,
             event_callback=event_callback,
+            run_id=run_id,
         )
         try:
             return await orchestrator.execute(input_data)
@@ -415,6 +571,7 @@ class AxonFlowEngine:
                 Route(
                     target=identifiers.get(route.target, route.target),
                     condition=route.condition,
+                    payload_mapping=route.payload_mapping,
                 )
                 for route in routes
             ]
@@ -430,9 +587,7 @@ class AxonFlowEngine:
         scoped.flow.join = {
             identifiers.get(target, target): join.model_copy(
                 update={
-                    "wait_for": [
-                        identifiers.get(agent_id, agent_id) for agent_id in join.wait_for
-                    ]
+                    "wait_for": [identifiers.get(agent_id, agent_id) for agent_id in join.wait_for]
                 }
             )
             for target, join in scoped.flow.join.items()
@@ -445,14 +600,11 @@ class AxonFlowEngine:
         overrides = scoped.context.get("agent_role_overrides")
         if isinstance(overrides, dict):
             scoped.context["agent_role_overrides"] = {
-                identifiers.get(agent_id, agent_id): value
-                for agent_id, value in overrides.items()
+                identifiers.get(agent_id, agent_id): value for agent_id, value in overrides.items()
             }
         return scoped
 
-    def _create_execution_agents(
-        self, config: WorkflowConfig
-    ) -> tuple[AgentRegistry, list]:
+    def _create_execution_agents(self, config: WorkflowConfig) -> tuple[AgentRegistry, list]:
         """Instantiate workflow entities from their reusable Agent templates."""
         assert self._agent_registry is not None
         assert self._message_bus is not None
@@ -463,12 +615,29 @@ class AxonFlowEngine:
 
         registry = AgentRegistry()
         execution_agents = []
+        all_candidate_configs = [
+            agent.config.model_copy(deep=True)
+            for agent in self._agent_registry.list_agents()
+            if agent.health_state != AgentHealthState.UNHEALTHY
+        ]
         for instance in config.agent_instances:
-            template = self._agent_registry.get(instance.template_id)
-            if template is None:
+            template = (
+                self._agent_registry.get(instance.template_id) if instance.template_id else None
+            )
+            if instance.template_id and template is None:
                 raise ValueError(f"Agent template not found: {instance.template_id}")
 
-            entity_config = template.config.model_copy(deep=True)
+            entity_config = (
+                template.config.model_copy(deep=True)
+                if template is not None
+                else AgentConfig(
+                    id=instance.id,
+                    name=instance.name,
+                    role=(instance.discovery.description if instance.discovery else ""),
+                    model=self.config.default_model.model_copy(deep=True),
+                    retry_limit=1,
+                )
+            )
             entity_config.id = instance.id
             entity_config.name = instance.name
             if instance.model_profile_id:
@@ -479,41 +648,133 @@ class AxonFlowEngine:
                     raise ValueError(f"Model profile not found: {instance.model_profile_id}")
                 entity_config.model = ModelConfig.model_validate(profile["config"])
                 entity_config.parameters["model_profile_id"] = instance.model_profile_id
-
-            entity = create_agent(
-                config=entity_config,
-                message_bus=self._message_bus,
-                llm_gateway=self._llm_gateway,
-                tool_registry=self._tool_registry,
-                memory_store=self._memory_store,
-                execution_logger=self._execution_logger,
-                skills_dir=self._config_dir / "skills",
-            )
+            discovery_policy = instance.discovery or instance.fallback_discovery
+            if discovery_policy is not None:
+                candidate_configs = [item.model_copy(deep=True) for item in all_candidate_configs]
+                if template is not None:
+                    preferred_config = entity_config.model_copy(deep=True)
+                    preferred_config.id = template.id
+                    candidate_configs = [
+                        preferred_config if item.id == template.id else item
+                        for item in candidate_configs
+                    ]
+                entity_config.retry_limit = 1
+                entity = DiscoveredAgent(
+                    config=entity_config,
+                    message_bus=self._message_bus,
+                    llm_gateway=self._llm_gateway,
+                    tool_registry=self._tool_registry,
+                    memory_store=self._memory_store,
+                    execution_logger=self._execution_logger,
+                    skills_dir=self._config_dir / "skills",
+                    candidate_configs=candidate_configs,
+                    discovery=discovery_policy,
+                    preferred_template_id=(
+                        instance.template_id if instance.fallback_discovery else None
+                    ),
+                )
+            else:
+                entity = create_agent(
+                    config=entity_config,
+                    message_bus=self._message_bus,
+                    llm_gateway=self._llm_gateway,
+                    tool_registry=self._tool_registry,
+                    memory_store=self._memory_store,
+                    execution_logger=self._execution_logger,
+                    skills_dir=self._config_dir / "skills",
+                )
             registry.register(entity)
             execution_agents.append(entity)
         return registry, execution_agents
 
     async def _scheduled_run(self, workflow_id: str, input_data: str) -> None:
         """调度器回调 — 执行工作流"""
+        run_id = f"scheduled-{uuid.uuid4().hex[:12]}"
+        workflow: PlatformWorkflow | None = None
+        if self._platform_store is not None:
+            workflow = self._platform_store.get_workflow(workflow_id)
+            if workflow is None:
+                configs = load_all_workflow_configs(self._config_dir / "workflows")
+                config = next((item for item in configs if item.id == workflow_id), None)
+                if config is not None:
+                    workflow = PlatformWorkflow.from_workflow_config(config)
+            if workflow is not None:
+                self._platform_store.create_run(run_id, workflow, input_data)
+
+        async def record_event(event_type: str, data: dict[str, Any]) -> None:
+            if self._platform_store is None or workflow is None:
+                return
+            timestamp = datetime.now(UTC).isoformat()
+            agent_id = data.get("agent_id") or data.get("supervisor_agent_id")
+            node_id = workflow.node_id_for_agent(agent_id) if isinstance(agent_id, str) else None
+            if node_id is not None:
+                data["node_id"] = node_id
+            self._platform_store.record_event(run_id, event_type, data, timestamp)
+            if node_id is None or not isinstance(agent_id, str):
+                return
+            if event_type == "node.task_assigned":
+                self._platform_store.update_node_run(run_id, node_id, agent_id, "queued")
+            elif event_type == "node.task_started":
+                self._platform_store.update_node_run(run_id, node_id, agent_id, "running")
+            elif event_type == "node.result_ready":
+                self._platform_store.update_node_run(
+                    run_id,
+                    node_id,
+                    agent_id,
+                    "completed",
+                    output=data.get("payload"),
+                )
+            elif event_type == "node.error":
+                self._platform_store.update_node_run(
+                    run_id,
+                    node_id,
+                    agent_id,
+                    "error",
+                    output=data.get("payload"),
+                    error=data.get("error"),
+                )
+            elif event_type == "supervisor.review_started":
+                self._platform_store.update_node_run(run_id, node_id, agent_id, "reviewing")
+            elif event_type == "supervisor.decision_ready":
+                self._platform_store.update_node_run(run_id, node_id, agent_id, "completed")
+
+        trace_result: dict[str, Any] | None = None
+        trace_error: str | None = None
         try:
-            result = await self.run_workflow(workflow_id, input_data)
+            await self.start_workflow_trace(run_id, workflow_id, input_data)
+            result = await self.run_workflow(
+                workflow_id,
+                input_data,
+                event_callback=record_event,
+            )
+            trace_result = result.to_dict()
+            if self._platform_store is not None and workflow is not None:
+                self._platform_store.complete_run(run_id, result.status, trace_result)
             logger.info(
                 "engine.scheduled_workflow_completed",
                 workflow_id=workflow_id,
+                run_id=run_id,
                 status=result.status,
             )
         except Exception as e:
+            trace_error = str(e)
+            if self._platform_store is not None and workflow is not None:
+                self._platform_store.complete_run(run_id, "error", {"error": trace_error})
             logger.error(
                 "engine.scheduled_workflow_failed",
                 workflow_id=workflow_id,
-                error=str(e),
+                run_id=run_id,
+                error=trace_error,
             )
+        finally:
+            await self.finish_workflow_trace(run_id, result=trace_result, error=trace_error)
 
     def status(self) -> dict:
         """获取系统状态"""
         return {
             "running": self._running,
             "agents": (self._agent_registry.get_states() if self._agent_registry else {}),
+            "agent_health": (self._agent_registry.get_health() if self._agent_registry else {}),
             "tools": (self._tool_registry.list_tools() if self._tool_registry else []),
             "token_usage": (self._llm_gateway.token_tracker.summary() if self._llm_gateway else {}),
         }

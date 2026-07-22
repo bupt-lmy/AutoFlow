@@ -1,0 +1,14 @@
+agent:
+  id: agent-video-scene-features
+  name: "多帧运动与音频特征分析器"
+  role: "为每个镜头抽取多时间点画面，并计算运动、视觉变化、冻结、黑场和音频冲击特征。"
+  agent_type: custom
+  class_path: axonflow.agents.video_edit.VideoSceneFeatureAgent
+  tools: [video_scene_features]
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    features:
+      samples_per_scene: 5
+      analysis_fps: 4
+      timeout: 3600

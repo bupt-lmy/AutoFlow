@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ class LLMTraceContext:
     execution_id: str
     agent_id: str
     run_id: str | None = None
+    trace_kind: str = "agent"
 
 
 class LLMGateway:
@@ -163,9 +165,14 @@ class LLMGateway:
             env_var = config.api_key_env or get_provider(config.provider).default_key_env
             key = os.environ.get(env_var) if env_var else None
             if not key:
+                safe_env_var = (
+                    env_var
+                    if env_var and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_var)
+                    else "[invalid environment variable]"
+                )
                 logger.warning(
                     "llm.api_key_missing",
-                    env_var=env_var,
+                    env_var=safe_env_var,
                 )
             else:
                 extra_kwargs["api_key"] = key
@@ -229,6 +236,34 @@ class LLMGateway:
         )
 
     @staticmethod
+    def _normalize_tool_call(tool_call: Any) -> dict[str, Any]:
+        """Normalize both LiteLLM objects and provider-native dictionaries."""
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function") or {}
+            if not isinstance(function, dict):
+                raise ValueError("Tool call function must be an object")
+            call_id = tool_call.get("id")
+            call_type = tool_call.get("type", "function")
+            name = function.get("name")
+            arguments = function.get("arguments", "{}")
+        else:
+            function = tool_call.function
+            call_id = tool_call.id
+            call_type = getattr(tool_call, "type", "function")
+            name = function.name
+            arguments = function.arguments
+
+        if not isinstance(call_id, str) or not call_id:
+            raise ValueError("Tool call id must be a non-empty string")
+        if not isinstance(name, str) or not name:
+            raise ValueError("Tool call function name must be a non-empty string")
+        return {
+            "id": call_id,
+            "function": {"name": name, "arguments": arguments},
+            "type": str(call_type or "function"),
+        }
+
+    @staticmethod
     def _preview_messages(messages: list[dict], content_policy: str) -> str | None:
         if content_policy == "metadata_only":
             return None
@@ -280,6 +315,7 @@ class LLMGateway:
             "workflow_id": trace_context.workflow_id if trace_context else None,
             "execution_id": trace_context.execution_id if trace_context else None,
             "agent_id": trace_context.agent_id if trace_context else None,
+            "trace_kind": trace_context.trace_kind if trace_context else "unscoped",
             "provider": config.provider,
             "model": model_str,
             "credential_id": credential_id,
@@ -340,17 +376,7 @@ class LLMGateway:
             # 解析 tool_calls（先于 content 处理，因为 content 的回退策略依赖是否有 tool_calls）
             tool_calls = None
             if hasattr(msg, "tool_calls") and msg.tool_calls:
-                tool_calls = [
-                    {
-                        "id": tc.id,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                        "type": tc.type,
-                    }
-                    for tc in msg.tool_calls
-                ]
+                tool_calls = [self._normalize_tool_call(tc) for tc in msg.tool_calls]
 
             # thinking 模型（如 Qwen3）在有 tool_calls 时 content 为空白，这是正常的。
             # 只有在：(1) 无 tool_calls 且 (2) content 真正为空时，才回退到 reasoning_content。

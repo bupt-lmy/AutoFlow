@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field
+from croniter import croniter
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ============================================================
 # LLM 模型配置
@@ -83,6 +85,7 @@ class AgentConfig(BaseModel):
     class_path: str | None = None  # 自定义 Agent 类路径，如 "mymodule.MyAgent"
     model: ModelConfig = Field(default_factory=ModelConfig)
     tools: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)  # 用于能力发现和 Agent 分类
     can_request: list[str] = Field(default_factory=list)
     max_concurrent: int = 1
     retry_limit: int = 3
@@ -92,14 +95,49 @@ class AgentConfig(BaseModel):
     skills: list[str] = Field(default_factory=list)  # 关联的 skill 名称列表
 
 
+class DiscoveryConfig(BaseModel):
+    """Runtime capability discovery and failover policy for a workflow slot."""
+
+    description: str = Field(min_length=1)
+    required_skills: list[str] = Field(default_factory=list)
+    required_tools: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    exclude_agents: list[str] = Field(default_factory=list)
+    max_candidates: int = Field(default=5, ge=1, le=50)
+    min_score: float = Field(default=0.05, ge=0, le=1)
+    timeout_seconds: float = Field(default=300, gt=0)
+    fallback_on_error: bool = True
+    fallback_on_timeout: bool = True
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        description = value.strip()
+        if not description:
+            raise ValueError("Discovery description cannot be blank")
+        return description
+
+
 class AgentInstanceConfig(BaseModel):
-    """A workflow-scoped Agent entity that reuses an AgentConfig template."""
+    """A workflow-scoped fixed Agent or runtime-discovered Agent slot."""
 
     id: str
     node_id: str
-    template_id: str
+    template_id: str | None = None
     name: str
     model_profile_id: str | None = None
+    discovery: DiscoveryConfig | None = None
+    fallback_discovery: DiscoveryConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_binding(self) -> AgentInstanceConfig:
+        if self.template_id is None and self.discovery is None:
+            raise ValueError("Agent instance requires template_id or discovery")
+        if self.template_id is not None and self.discovery is not None:
+            raise ValueError("Agent instance cannot define both template_id and discovery")
+        if self.template_id is None and self.model_profile_id is not None:
+            raise ValueError("Discovered Agent slots cannot override a template model profile")
+        return self
 
 
 # ============================================================
@@ -113,6 +151,21 @@ class TriggerConfig(BaseModel):
     type: str = "manual"  # manual / cron / event
     cron: str | None = None
     event: str | None = None
+    timezone: str = "UTC"
+    input: str = ""
+
+    @model_validator(mode="after")
+    def validate_trigger(self) -> TriggerConfig:
+        if self.type == "cron":
+            if not self.cron:
+                raise ValueError("Cron triggers require a cron expression")
+            if not croniter.is_valid(self.cron):
+                raise ValueError("Invalid cron expression")
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown timezone: {self.timezone}") from exc
+        return self
 
 
 class RouteCondition(BaseModel):
@@ -140,11 +193,29 @@ class RouteCondition(BaseModel):
             return False
 
 
+class RoutePayloadMapping(BaseModel):
+    """Select the business fields sent across a workflow route."""
+
+    include: list[str] = Field(default_factory=list)
+    task_field: str | None = None
+
+    @field_validator("include")
+    @classmethod
+    def normalize_include(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(field.strip() for field in value if field.strip()))
+
+    @field_validator("task_field")
+    @classmethod
+    def normalize_task_field(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+
 class Route(BaseModel):
     """路由规则"""
 
     target: str  # 目标 Agent ID
     condition: RouteCondition | None = None
+    payload_mapping: RoutePayloadMapping | None = None
 
 
 class JoinConfig(BaseModel):
@@ -161,8 +232,30 @@ class SupervisorConfig(BaseModel):
     """Supervisor 模式配置"""
 
     agent_id: str  # 用作 supervisor 的 Agent ID
+    responsibility: str = (
+        "Review every Agent result, enforce workflow quality gates, and decide whether to "
+        "continue, request rework, reassign, or finish."
+    )
+    capabilities: list[str] = Field(
+        default_factory=lambda: [
+            "execution planning",
+            "result review",
+            "routing control",
+            "failure recovery",
+        ]
+    )
     planning_enabled: bool = True  # 是否在开头做全局规划
     intervention_on_failure: bool = True  # agent 失败时是否自动介入纠偏
+
+    @field_validator("responsibility")
+    @classmethod
+    def normalize_responsibility(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("capabilities")
+    @classmethod
+    def normalize_capabilities(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(item.strip() for item in value if item.strip()))
 
 
 class FlowConfig(BaseModel):
@@ -176,6 +269,12 @@ class FlowConfig(BaseModel):
     terminate_on: list[dict[str, Any]] = Field(default_factory=list)
     join: dict[str, JoinConfig] = Field(default_factory=dict)  # fan-in 汇聚点
     supervisor: SupervisorConfig | None = None  # supervisor 模式配置
+
+    @model_validator(mode="after")
+    def validate_supervisor_mode(self) -> FlowConfig:
+        if self.mode == "supervisor" and self.supervisor is None:
+            raise ValueError("Supervisor mode requires a supervisor configuration")
+        return self
 
 
 class WorkflowConfig(BaseModel):
@@ -231,6 +330,14 @@ class PluginsConfig(BaseModel):
     tools: list[ToolPluginConfig] = Field(default_factory=list)
 
 
+class AgentHealthConfig(BaseModel):
+    """Agent endpoint/model health probing policy."""
+
+    enabled: bool = True
+    interval_seconds: float = Field(default=300, ge=10)
+    timeout_seconds: float = Field(default=15, gt=0, le=300)
+
+
 class AxonFlowConfig(BaseModel):
     """AxonFlow 全局配置"""
 
@@ -238,6 +345,7 @@ class AxonFlowConfig(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     webhooks: list[WebhookEndpoint] = Field(default_factory=list)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
+    agent_health: AgentHealthConfig = Field(default_factory=AgentHealthConfig)
     log_level: str = "INFO"
     log_format: str = "json"  # json / console
     workspace_dir: str = "./workspace"

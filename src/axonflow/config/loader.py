@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import TypeVar
 
@@ -205,7 +206,11 @@ def load_skill_content(skills_dir: Path, skill_names: list[str]) -> str:
             if skill_md.exists():
                 content = skill_md.read_text(encoding="utf-8")
                 content = _resolve_script_refs(content, skill_dir / "scripts")
-                sections.append(content)
+                sections.append(
+                    f"Skill package: {name}\n"
+                    f"Package root: {skill_dir.resolve()}\n"
+                    f"Entrypoint: {skill_md.resolve()}\n\n{content}"
+                )
             else:
                 logger.warning("skill.missing_skill_md", skill=name)
             continue
@@ -225,9 +230,28 @@ def _resolve_script_refs(content: str, scripts_dir: Path) -> str:
 
     def _replacer(m: re.Match) -> str:
         script_name = m.group(1)
-        script_path = scripts_dir / script_name
-        if script_path.exists():
-            return f"使用 shell_exec 工具执行 {script_path.resolve()}"
+        relative = Path(script_name)
+        scripts_root = scripts_dir.resolve()
+        candidate = scripts_dir / relative
+        script_path = candidate.resolve()
+        if (
+            not relative.is_absolute()
+            and ".." not in relative.parts
+            and script_path.is_relative_to(scripts_root)
+            and script_path.is_file()
+            and not candidate.is_symlink()
+        ):
+            interpreters = {
+                ".js": "node",
+                ".mjs": "node",
+                ".py": "python",
+                ".sh": "bash",
+                ".zsh": "zsh",
+            }
+            resolved_path = shlex.quote(str(script_path.resolve()))
+            interpreter = interpreters.get(script_path.suffix.lower())
+            command = f"{interpreter} {resolved_path}" if interpreter else resolved_path
+            return f"使用 shell_exec 工具执行 {command}"
         logger.warning("skill.script_not_found", script=script_name)
         return m.group(0)  # 保留原始文本
 

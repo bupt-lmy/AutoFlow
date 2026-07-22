@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from axonflow.config.models import AgentConfig
 from axonflow.core.context import WorkflowContext
 from axonflow.core.message import Message
@@ -67,6 +69,30 @@ class PromptBuilder:
             if state_str:
                 system_parts.append(f"\n当前工作流上下文:\n{state_str}")
 
+        protocol = incoming_message.payload.get("_protocol")
+        if isinstance(protocol, dict):
+            protocol_lines = [
+                f"- 协议版本: {protocol.get('version', incoming_message.protocol_version)}",
+                f"- Session ID: {protocol.get('session_id', incoming_message.session_id)}",
+                f"- Task ID: {protocol.get('task_id', incoming_message.task_id)}",
+            ]
+            if protocol.get("requested_capability"):
+                protocol_lines.append(f"- 当前职责: {protocol['requested_capability']}")
+            if protocol.get("selected_agent"):
+                protocol_lines.append(f"- 运行时选中的 Agent: {protocol['selected_agent']}")
+            command = protocol.get("command")
+            if isinstance(command, dict) and command.get("command"):
+                protocol_lines.append(f"- 任务指令: {command['command']}")
+            protocol_lines.append(f"- 当前尝试: {protocol.get('attempt', 1)}")
+            previous_attempts = protocol.get("previous_attempts")
+            if previous_attempts:
+                protocol_lines.append(f"- 已失败尝试: {previous_attempts}")
+            system_parts.append(
+                "\n## 任务协作协议\n"
+                + "\n".join(protocol_lines)
+                + "\n请完成当前职责，并在结果中保留可供下游使用的证据、产物和失败原因。"
+            )
+
         if tool_schemas:
             tool_names = [t["function"]["name"] for t in tool_schemas]
             system_parts.append(
@@ -104,6 +130,19 @@ class PromptBuilder:
             "task",
             incoming_message.payload.get("content", str(incoming_message.payload)),
         )
+        if not isinstance(task_content, str):
+            task_content = str(task_content)
+        business_payload = {
+            key: value
+            for key, value in incoming_message.payload.items()
+            if key not in {"_protocol", "task_result"}
+        }
+        extra_fields = set(business_payload) - {"task", "content"}
+        if extra_fields:
+            task_content += (
+                "\n\n完整上游结构化数据（用于核对证据、产物和业务状态）：\n"
+                + json.dumps(business_payload, ensure_ascii=False, indent=2, default=str)
+            )
         messages.append({"role": "user", "content": task_content})
 
         return messages

@@ -1,0 +1,9 @@
+agent:
+  id: agent-hard-subtitle
+  name: "硬字幕烧录器"
+  role: "使用 FFmpeg libass 将 SRT 字幕永久烧录进视频画面，确保所有播放器可见。"
+  agent_type: custom
+  class_path: axonflow.agents.video_edit.HardSubtitleAgent
+  tools: [hard_subtitle_burn]
+  retry_limit: 1
+  memory: {enabled: false}

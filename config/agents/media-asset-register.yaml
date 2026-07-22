@@ -1,0 +1,11 @@
+agent:
+  id: agent-media-asset-register
+  name: "成片资产登记器"
+  role: "仅将通过技术质检的最终成片登记到平台媒体资产库。"
+  agent_type: custom
+  class_path: axonflow.agents.media.MediaAssetRegisterAgent
+  tools:
+    - media_register
+  retry_limit: 1
+  memory:
+    enabled: false

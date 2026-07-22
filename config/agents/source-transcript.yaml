@@ -1,0 +1,13 @@
+agent:
+  id: agent-source-transcript
+  name: "源片对白语义分析器"
+  role: "在选片前转写源片对白，并按时间码与镜头对齐，使剧情和台词描述可检索。"
+  agent_type: custom
+  class_path: axonflow.agents.video_edit.SourceTranscriptAgent
+  tools: [video_transcribe]
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    transcription:
+      language: auto
+      timeout: 7200

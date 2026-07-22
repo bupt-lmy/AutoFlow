@@ -1,448 +1,199 @@
 # AxonFlow
 
-**基于多智能体的自治工作流引擎** — 让智能体像团队一样协作，实现 24/7 全自动生产力。
+**基于多智能体的自治工作流引擎。** AxonFlow 通过 YAML 或 Web 画布定义多 Agent 协作流程，并提供模型网关、工具调用、实时执行观察和配置管理能力。
 
-AxonFlow 提供完整的多 Agent 编排系统：Agent 自主调用工具、多 Agent 按路由协作、Supervisor 模式监督、Web 管理界面实时监控、CLI 命令行操作。
+> 当前状态：Alpha（2026-07-16）。后端测试已验证通过；请在接入生产凭据、文件系统或发布工具前完成权限与安全评估。
 
----
+## 当前能力
 
-## 功能特性
+- **工作流编排**：`flat` 模式支持顺序、条件分支、扇出、汇聚（fan-in）和有上限的回路；`supervisor` 模式由模型规划并在每轮结果后决定下一步。
+- **局部 ReAct**：每个基础 Agent 可在一次任务内执行“LLM → 工具调用 → 工具结果 → LLM”的循环，最多 10 轮。
+- **Agent 管理**：支持 YAML Agent、目录式 Persona（`soul.md` / `user.md` / `workflow.md`）、工作流级 Agent 实体、模型配置复用、托管 Skills，以及 HTTP Remote Agent。
+- **动态发现与替换**：工作流可放置不绑定模板的 Dynamic Agent，运行时按能力、Tools、Skills、Tags 发现执行者；固定 Agent 出错或超时时可按策略发现替代者。
+- **AIP-lite 协议**：任务消息带版本、Session/Task ID，任务结果可表达状态、数据项和产物；发现选择与失败尝试会注入 Agent Prompt。
+- **模型与工具**：LiteLLM 统一接入模型、备用模型；内置 24 个文件、Shell、Git、搜索、抓取、Python、JSON、归档、进程与媒体类工具，并可加载插件工具。
+- **平台界面**：React + Ant Design 管理台提供工作流 DAG 创建/编辑、Agent 与 Skill 管理、YAML 编辑、运行记录、执行日志和 LLM Trace 页面；运行事件通过 WebSocket 推送。
+- **运行保障**：启动时和运行期间定期探测 Agent 模型/远程端点，区分消息循环 Activity 与真实 Ready 状态；Redis 不可用时降级为内存消息总线；Web 可配置 Cron、时区和定时输入，调度变更即时生效且运行进入历史记录。
 
-- **多智能体协作**：Agent 按工作流路由自动流转，支持 Flat 和 Supervisor 两种编排模式
-- **15 个内置工具**：文件读写、Shell 执行、Git 操作、网络搜索、网页抓取、Python 沙箱执行、JSON 查询、文本搜索、目录浏览、文件修补、环境变量、归档压缩、进程管理、HTTP 请求
-- **LLM 统一网关**：通过 LiteLLM 支持 OpenAI / Anthropic / 本地模型，自动 fallback
-- **Web 管理界面**：React + Ant Design 全功能管理平台，DAG 可视化、实时日志、YAML 在线编辑
-- **WebSocket 实时推送**：工作流执行过程中的 tool 调用、Agent 消息实时推送到前端
-- **Persona 系统**：每个 Agent 可配置独立的 soul / user / workflow 人格文件
-- **插件工具系统**：通过配置文件动态加载自定义工具
-- **定时调度**：Cron 表达式触发工作流自动执行
+## 编排模式与边界
 
----
+工作流不是只能链式执行。`flat` 路由可以形成如下闭环：
 
-## 系统要求
+```text
+需求 → 需求分析 → 编码 → 测试 ──通过──→ 评测/交付
+                         │
+                         └──未通过──→ 编码
+```
 
-| 依赖 | 版本要求 | 说明 |
-|------|---------|------|
-| Python | >= 3.11 | 推荐 3.12+ |
-| Node.js | >= 18 | 前端构建需要，推荐 20 LTS |
-| npm | >= 9 | 随 Node.js 安装 |
-| Redis | >= 5.0 | **可选**，不装则自动降级为内存消息总线 |
-| Git | >= 2.0 | 项目管理和 git_ops 工具需要 |
-
----
+其中“未通过”必须是实际的结构化结果（例如 `{"status": "error", "content": "..."}`），而不只是模型回复中的一句“测试失败”。当前 `BaseAgent` 对正常文本回复固定返回 `status: success`；因此可靠的质量闭环应使用能返回结构化状态的自定义 Agent 或 `remote` Agent。完整说明、可执行的路由范式和限制见 [工作流模式说明](docs/WORKFLOW_PATTERNS.md)。
 
 ## 快速开始
 
-### 一键安装
-
-我们提供了自动化安装脚本，会完成环境检测、依赖安装、前端构建、配置初始化等所有步骤。
-
-**macOS / Linux：**
+### 安装
 
 ```bash
-git clone <your-repo-url> AxonFlow
-cd AxonFlow
-chmod +x setup.sh
-./setup.sh
-```
-
-**Windows（PowerShell，以管理员身份运行）：**
-
-```powershell
-git clone <your-repo-url> AxonFlow
-cd AxonFlow
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\setup.ps1
-```
-
-安装完成后，按照脚本提示启动服务即可。
-
----
-
-### 手动安装
-
-如果你不想使用一键脚本，也可以手动完成每一步。
-
-#### 第 1 步：安装 Python 后端
-
-```bash
-# 创建虚拟环境（推荐）
 python3 -m venv .venv
-source .venv/bin/activate     # macOS/Linux
-# .\.venv\Scripts\Activate.ps1  # Windows PowerShell
-
-# 安装项目及所有依赖
+source .venv/bin/activate
 pip install -e ".[dev]"
-```
 
-#### 第 2 步：配置 LLM API Key
-
-AxonFlow 使用 OpenAI 兼容 API 格式。你需要设置环境变量：
-
-```bash
-# macOS/Linux — 添加到 ~/.bashrc 或 ~/.zshrc 以永久生效
-export OPENAI_API_KEY="your-api-key-here"
-
-# 如果使用自定义 API 端点（如本地模型、第三方兼容服务）：
-export OPENAI_BASE_URL="https://your-api-endpoint/v1"
-```
-
-```powershell
-# Windows PowerShell（仅当前会话）
-$env:OPENAI_API_KEY = "your-api-key-here"
-$env:OPENAI_BASE_URL = "https://your-api-endpoint/v1"
-
-# 永久设置（系统级）
-[System.Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "your-api-key-here", "User")
-```
-
-也可以在 `config/axonflow.yaml` 中修改 `default_model` 配置：
-
-```yaml
-default_model:
-  provider: "openai"
-  name: "gpt-4o"            # 模型名称
-  temperature: 0.7
-  max_tokens: 4096
-  api_base: ""               # 留空则使用 OPENAI_BASE_URL 环境变量
-  api_key_env: "OPENAI_API_KEY"  # 从哪个环境变量读取 API Key
-  fallback_models:
-    - "gpt-4o-mini"          # 主模型不可用时的备选
-```
-
-#### 第 3 步：安装前端
-
-```bash
 cd frontend
 npm install
 cd ..
 ```
 
-#### 第 4 步：验证安装
+配置所用模型的凭据，例如：
 
 ```bash
-# 运行后端测试
+export OPENAI_API_KEY="your-api-key"
+```
+
+模型、端点和备用模型在 `config/axonflow.yaml` 或 Agent 配置的 `model` 字段中定义。仓库附带的示例 Agent 使用了特定的兼容端点；在其他环境运行前，请替换 `api_base`、模型名和密钥环境变量。
+
+### 验证与运行
+
+```bash
 pytest tests/ -q
-
-# 查看系统状态（CLI 模式）
 axonflow status
-
-# 构建前端（可选，生产部署用）
-cd frontend && npm run build && cd ..
-```
-
----
-
-## 启动服务
-
-AxonFlow 有两种使用方式：**CLI 模式**和 **Web 界面模式**。
-
-### 方式一：CLI 命令行
-
-适合快速执行单次工作流，无需启动 Web 服务。
-
-```bash
-# 查看已注册的 Agent 和工作流
-axonflow status
-
-# 执行工作流
 axonflow run dev-pipeline --input "实现一个快速排序函数"
-
-# 启动引擎守护进程（持续运行，支持定时任务）
-axonflow start --daemon
 ```
 
-### 方式二：Web 管理界面（推荐）
-
-完整的图形化管理平台，支持实时监控、配置编辑、工作流可视化。
-
-**需要同时启动后端 API 和前端 dev server：**
-
-**终端 1 — 启动后端 API：**
+首个影视剪辑 MVP 工作流会执行“媒体探测 → Timeline 规划 → MP4 渲染”。媒体 Worker
+需要安装 FFmpeg，输入和输出必须使用本地绝对路径：
 
 ```bash
-# macOS/Linux
-OPENAI_API_KEY="your-key" python -m uvicorn axonflow.api.app:app --port 8000 --reload
+axonflow run video-edit-mvp --input \
+  '{"assets":{"asset-source":"/absolute/path/source.mp4"},"output_path":"/absolute/path/result.mp4","target":{"width":1080,"height":1920,"fps":30}}'
+```
 
-# Windows PowerShell
-$env:OPENAI_API_KEY = "your-key"
+影视语义剪辑工作流接受“本地源视频或目标链接 + 内容描述”，执行资源导入、镜头切分、
+每镜头多帧采样、运动/画面变化/音频冲击特征提取、MiniMax-M3 多模态语义分析、
+综合精彩度评分、动作峰值区间精修、帧级精确拼接、本地 Whisper 对白转写、硬字幕烧录、
+技术质检和资产登记。无台词镜头不会因缺少对白而被降权；链接只能用于用户有权下载和
+处理的资源：
+
+```bash
+# 一键生成无版权合成样片并跑通默认工作流（MiniMax 和 Whisper 均为可选增强）
+./examples/semantic-video-edit/run-demo.sh
+```
+
+完整的新用户说明、依赖降级行为和 Web 平台入口见
+[影视语义剪辑默认示例](examples/semantic-video-edit/README.md)。工作流及其 12 个 Agent 配置
+均位于 `config/`，克隆源码后会自动出现在平台工作流列表中。
+
+```bash
+axonflow run semantic-video-edit --input \
+  '{"source":"/absolute/path/source.mp4","description":"找出节奏紧张的追逐和对抗片段，排除静态空镜","target_duration_seconds":30,"hard_subtitles":true}'
+```
+
+长视频会先从运动高分、对白高密度和全片时间覆盖三个维度筛出有限的语义分析候选，
+再对全部镜头保留确定性特征评分。工作流使用 `ffmpeg-full`/libass 保留源视频动作和原声，
+通过 `trim`/`atrim` 精确到目标帧边界，并将 SRT 永久烧录到画面；
+URL 导入依赖 `yt-dlp`。自动转写可选依赖 `whisper-cli` 和
+`workspace/models/ggml-small.bin`；缺失时工作流继续完成纯视觉选片，并生成基于选片原因的
+旁路 SRT。输出写入 `workspace/media/final/`，通过技术质检后才登记。
+
+文本生成视频使用独立的 `text-to-video-generation` 工作流，不读取或剪切已有视频。默认后端
+不需要 MiniMax 视频生成额度，执行“可选开放资源搜索 → M3 连续动作分镜规划 → image-01
+生成四张关键帧 → FFmpeg 推拉摇移与交叉淡化 → 永久 AI 虚构标识 → H.264/AAC 标准化
+→ 质检 → 资产登记”：
+
+```bash
+axonflow run text-to-video-generation --input \
+  '{"description":"明显虚构的讽刺喜剧 AI 场景：一名公众人物罚点球射失后抱头痛哭","generation_backend":"storyboard","collect_resources":false}'
+```
+
+默认 `storyboard` 后端输出的是“多镜头动态分镜视频”：画面有逐帧运镜和镜头转场，但人物肢体
+不会像原生视频模型那样逐帧连续运动。涉及公众人物的虚构场景必须保留
+`AI GENERATED - FICTIONAL` 画面标识。以后获得 Hailuo 视频额度后，可显式传入
+`"generation_backend":"hailuo"`；该后端支持 6 或 10 秒，10 秒只支持 768P，并使用独立 Credits。
+
+旧版 MiniMax 素材合成工作流会执行“创意策划 → 图片/旁白/配乐并行生成 → 素材汇总 → SRT 字幕
+→ FFmpeg 成片合成 → 技术质检 → 正式资产登记”。它使用 MiniMax-M3、`image-01`、
+`speech-2.8-hd` 和 `music-2.6`，需要先在平台凭据库配置 MiniMax Key，或设置
+`MINIMAX_API_KEY`：
+
+```bash
+axonflow run video-asset-generation-minimax --input \
+  "制作一条关于未来城市清晨苏醒的温暖电影感短片"
+```
+
+生成文件分别保存到 `workspace/media/generated/`、`workspace/media/subtitles/` 和
+`workspace/media/composed/`。成片固定输出 H.264/AAC、1080p、30 fps、48 kHz Stereo，
+内含可开关中文字幕轨；质检会完整解码文件，通过后才写入媒体资产库。配乐生成通常
+明显慢于图片和语音，工作流会等待三个并行分支全部成功后再继续。
+
+Web API 已提供本地素材和异步渲染任务入口：
+
+```text
+POST /api/assets/upload?name=source.mp4&kind=video   # 请求体为原始文件字节
+GET  /api/assets/{asset_id}/content                 # 下载或预览工作区资产
+POST /api/render-jobs                               # 提交 Timeline 和 output_name
+GET  /api/render-jobs/{job_id}                      # 查询 queued/running/completed 状态
+POST /api/render-jobs/{job_id}/cancel               # 取消活动渲染任务
+```
+
+上传内容会流式保存到 `workspace/media/assets/`，渲染结果保存到
+`workspace/media/renders/`；两者都会记录 SHA-256 并登记到媒体资产库。
+
+运行 Web 管理台：
+
+```bash
+# 终端 1：后端
 python -m uvicorn axonflow.api.app:app --port 8000 --reload
+
+# 终端 2：前端
+cd frontend && npm run dev
 ```
 
-**终端 2 — 启动前端 dev server：**
+开发环境访问 `http://localhost:5173`。构建前端后，后端会在 `frontend/dist/` 存在时挂载静态页面：
 
 ```bash
-cd frontend
-npm run dev
-```
-
-然后打开浏览器访问：**http://localhost:5173**
-
-#### Web 界面功能一览
-
-| 页面 | 路径 | 功能 |
-|------|------|------|
-| Dashboard | `/` | 系统状态总览，Agent 运行状态，工具列表，Token 用量 |
-| Workflows | `/workflows` | 工作流列表，DAG 流程图可视化，YAML 在线编辑 |
-| Workflow 执行 | `/workflows/:id/run/:runId` | 触发工作流，实时 WebSocket 事件日志 |
-| Agents | `/agents` | Agent 列表，模型配置，工具配置查看 |
-| Agent 详情 | `/agents/:id` | Agent YAML 编辑，Persona Markdown 编辑 |
-| Logs | `/logs` | 执行日志查询，按 Agent/Action 过滤 |
-| Settings | `/settings` | 全局配置 YAML 在线编辑（模型、Redis、日志级别等） |
-
-### 生产部署（一体化）
-
-构建前端后，后端可以直接 serve 前端静态文件，无需单独启动前端：
-
-```bash
-# 构建前端
 cd frontend && npm run build && cd ..
-
-# 启动后端（自动 serve frontend/dist/）
-OPENAI_API_KEY="your-key" python -m uvicorn axonflow.api.app:app --port 8000
-
-# 访问 http://localhost:8000 即可使用完整功能
+python -m uvicorn axonflow.api.app:app --port 8000
 ```
 
----
+## 配置概览
 
-## 配置说明
-
-### 目录结构
-
-```
+```text
 config/
-├── axonflow.yaml            # 全局配置（模型、Redis、日志、沙箱等）
-├── agents/                  # Agent 配置
-│   ├── coder/               # 目录模式（含 persona 文件）
-│   │   ├── config.yaml      #   Agent 配置
-│   │   ├── soul.md          #   价值观与行为准则
-│   │   ├── user.md          #   用户画像
-│   │   └── workflow.md      #   工作流程指南
-│   ├── tester.yaml          # 单文件模式
-│   └── publisher.yaml
-└── workflows/               # 工作流配置
-    ├── dev-pipeline.yaml    #   软件开发流水线
-    ├── content-pipeline.yaml #  内容创作流水线
-    └── supervised-dev-pipeline.yaml  # Supervisor 模式
+├── axonflow.yaml             # 全局模型、Redis、沙箱、日志、Webhook
+├── agents/                   # 单文件或目录式 Agent 配置
+│   └── coder/                # config.yaml + 可选 Persona Markdown
+├── skills/                   # 托管 Skill（SKILL.md）
+└── workflows/                # 可运行的工作流 YAML
 ```
 
-### Agent 配置示例
+基础工作流示例：
 
 ```yaml
-# config/agents/tester.yaml
-id: agent-tester
-name: "测试专员"
-role: "你是一名资深测试工程师..."
-
-model:
-  provider: "openai"
-  name: "gpt-4o"
-  temperature: 0.2
-  max_tokens: 4096
-
-tools:
-  - file_write
-  - file_read
-  - shell_exec
-  - python_eval        # 新增：可用 Python 执行测试
-  - text_search        # 新增：搜索代码内容
-
-can_request:
-  - agent-coder
-  - agent-publisher
-
-retry_limit: 3
-```
-
-### 工作流配置示例
-
-```yaml
-# config/workflows/dev-pipeline.yaml
 workflow:
   id: dev-pipeline
   name: "软件开发流水线"
-  trigger:
-    type: manual
-
-  agents:
-    - agent-coder
-    - agent-tester
-    - agent-publisher
-
+  agents: [agent-coder, agent-tester, agent-publisher]
   flow:
+    mode: flat
     entry: agent-coder
     max_iterations: 10
     timeout: 3600
-
     routes:
       agent-coder:
         - target: agent-tester
       agent-tester:
         - target: agent-publisher
-          condition: { field: status, operator: eq, value: success }
+          condition: {field: status, operator: eq, value: success}
         - target: agent-coder
-          condition: { field: status, operator: eq, value: error }
-
+          condition: {field: status, operator: eq, value: error}
     terminate_on:
-      - agent: agent-publisher
-        status: success
+      - {agent: agent-publisher, status: success}
 ```
 
----
+## 文档导航
 
-## 内置工具列表
+- [工作流模式与局部 ReAct](docs/WORKFLOW_PATTERNS.md)：当前编排语义、闭环范式和落地条件。
+- [复杂 Agent 接入、发现与故障替换](docs/AGENT_INTEGRATION.md)：接入契约、动态占位 Agent、ADP-lite 和 AIP-lite。
+- [技术设计](docs/TECHNICAL_DESIGN.md)：实际架构、消息流、运行时与已知边界。
+- [产品需求与路线](docs/PRD.md)：目标、已完成能力与后续优先项。
+- [项目结构](docs/PROJECT_STRUCTURE.md)：当前目录和模块职责。
+- [前端说明](frontend/README.md)：前端开发、构建与页面说明。
 
-AxonFlow 内置 15 个工具，Agent 可在配置中按需引用：
-
-| 工具名 | 功能 | 关键参数 |
-|--------|------|---------|
-| `shell_exec` | 执行 Shell 命令 | `command`, `timeout`, `cwd` |
-| `file_read` | 读取文件内容 | `path` |
-| `file_write` | 写入文件（自动创建目录） | `path`, `content` |
-| `file_patch` | 文件局部修改（搜索替换/行范围） | `path`, `mode`, `search`, `replace` |
-| `git_ops` | Git 操作（commit/push/pull 等） | `operation`, `cwd`, `args` |
-| `http_request` | HTTP GET/POST 请求 | `url`, `method`, `headers`, `body` |
-| `web_search` | DuckDuckGo 网络搜索 | `query`, `max_results` |
-| `web_scrape` | 网页内容抓取（HTML 转纯文本） | `url`, `max_length` |
-| `text_search` | 文件/目录内容搜索（正则） | `pattern`, `path`, `recursive` |
-| `python_eval` | 沙箱 Python 代码执行 | `code`, `timeout` |
-| `json_query` | JMESPath JSON 数据提取 | `data`, `expression` |
-| `directory_tree` | 目录树结构显示 | `path`, `max_depth`, `show_size` |
-| `env_vars` | 环境变量读取（敏感值脱敏） | `action`, `name`, `prefix` |
-| `archive_ops` | tar.gz/zip 压缩解压 | `action`, `archive_path`, `source_paths` |
-| `process_manager` | 后台进程管理 | `action`, `command`, `pid`, `name` |
-
----
-
-## 项目结构
-
-```
-AxonFlow/
-├── src/axonflow/              # Python 后端
-│   ├── api/                   #   FastAPI REST API + WebSocket
-│   │   ├── app.py             #     应用入口、lifespan 管理
-│   │   ├── ws.py              #     WebSocket 事件广播器
-│   │   ├── deps.py            #     依赖注入
-│   │   └── routes/            #     API 路由
-│   │       ├── system.py      #       系统状态
-│   │       ├── workflows.py   #       工作流 CRUD + 执行
-│   │       ├── agents.py      #       Agent CRUD + Persona
-│   │       ├── logs.py        #       执行日志查询
-│   │       └── config.py      #       全局配置管理
-│   ├── core/                  #   核心运行时
-│   │   ├── agent.py           #     Agent 基类 + 注册中心
-│   │   ├── workflow.py        #     工作流编排器（Flat/Supervisor）
-│   │   ├── message.py         #     消息协议
-│   │   └── context.py         #     工作流上下文
-│   ├── llm/                   #   LLM 统一网关
-│   │   ├── gateway.py         #     多模型调用 + fallback
-│   │   └── token_tracker.py   #     Token 用量追踪
-│   ├── tools/                 #   工具系统（15 个内置工具）
-│   ├── messaging/             #   消息总线（Redis / InMemory）
-│   ├── config/                #   配置加载 + Pydantic 模型
-│   ├── observability/         #   执行日志 + 结构化日志
-│   ├── memory/                #   Agent 记忆存储
-│   ├── cli/                   #   Typer CLI
-│   └── engine.py              #   引擎主入口（模块组装）
-├── frontend/                  # React 前端 SPA
-│   ├── src/
-│   │   ├── pages/             #   Dashboard, Workflows, Agents, Logs, Settings
-│   │   ├── components/        #   StatusCard, LiveEventLog, YamlEditor
-│   │   ├── layouts/           #   侧边栏布局
-│   │   └── api/               #   fetch 封装 + WebSocket hook
-│   ├── package.json
-│   └── vite.config.ts         #   Vite 配置（proxy → 后端）
-├── config/                    # 运行时配置
-│   ├── axonflow.yaml          #   全局配置
-│   ├── agents/                #   Agent 配置
-│   └── workflows/             #   工作流配置
-├── tests/                     # 测试（150+ 用例）
-├── docs/                      # 文档
-├── setup.sh                   # macOS/Linux 一键安装脚本
-├── setup.ps1                  # Windows 一键安装脚本
-└── pyproject.toml             # 项目元数据 + 依赖
-```
-
----
-
-## 开发
-
-```bash
-# 运行测试
-pytest tests/ -q
-
-# 运行测试 + 覆盖率
-pytest tests/ --cov=axonflow --cov-report=html
-
-# 代码格式检查
-ruff check src/ tests/
-
-# 类型检查
-mypy src/axonflow/
-```
-
----
-
-## 常见问题
-
-### Q: Redis 没装怎么办？
-
-不影响使用。AxonFlow 检测到 Redis 不可用时会自动降级为内存消息总线（InMemory）。日志中会显示：
-```
-engine.redis_unavailable  fallback=in_memory
-```
-
-### Q: 支持哪些 LLM 模型？
-
-通过 LiteLLM 支持所有 OpenAI 兼容 API，包括：
-- OpenAI（GPT-4o, GPT-4o-mini 等）
-- Anthropic（Claude 系列）
-- 本地部署模型（Ollama, vLLM, LM Studio 等）
-- 其他 OpenAI 兼容服务
-
-在 `config/axonflow.yaml` 的 `default_model` 中配置即可。每个 Agent 也可以覆盖模型配置。
-
-### Q: 如何添加自定义工具？
-
-1. 创建 Python 类继承 `Tool` 基类
-2. 在 `config/axonflow.yaml` 的 `plugins.tools` 中注册
-
-```python
-# my_tools/custom_tool.py
-from axonflow.tools.base import Tool, ToolResult
-
-class MyCustomTool(Tool):
-    name = "my_tool"
-    description = "我的自定义工具"
-    parameters = {"type": "object", "properties": {...}, "required": [...]}
-
-    async def execute(self, **kwargs) -> ToolResult:
-        return ToolResult(success=True, output="done")
-```
-
-```yaml
-# config/axonflow.yaml
-plugins:
-  tools:
-    - class_path: "my_tools.custom_tool.MyCustomTool"
-```
-
-### Q: 前端报 API 连接错误？
-
-确保后端 API 在 `localhost:8000` 运行。Vite dev server 通过 proxy 将 `/api` 和 `/ws` 请求转发到后端。如果后端端口不是 8000，需要修改 `frontend/vite.config.ts`。
-
----
-
-## 文档
-
-- [产品需求文档 (PRD)](docs/PRD.md)
-- [技术实现方案](docs/TECHNICAL_DESIGN.md)
-- [项目目录结构](docs/PROJECT_STRUCTURE.md)
-- [前端设计规格](docs/superpowers/specs/2026-04-08-frontend-web-ui-design.md)
-
----
-
-## License
-
-Apache License 2.0
+历史方案保留在 `docs/specs/` 和 `docs/superpowers/`，用于追溯决策，不代表当前实现。

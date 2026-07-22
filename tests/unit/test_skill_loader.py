@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
-from axonflow.config.loader import load_skill_content, _resolve_script_refs
+import pytest
+
+from axonflow.config.loader import _resolve_script_refs, load_skill_content
 from axonflow.config.models import AgentConfig, ModelConfig
+from axonflow.core.agent import BaseAgent
+from axonflow.core.message import Message, MessageType
+from axonflow.llm.gateway import LLMResponse
+from axonflow.messaging.memory_bus import InMemoryMessageBus
+from axonflow.tools.base import ToolRegistry
 
 
 class TestAgentConfigSkills:
@@ -32,7 +39,18 @@ class TestResolveScriptRefs:
         result = _resolve_script_refs(content, scripts_dir)
         assert "@script:" not in result
         assert "shell_exec" in result
+        assert "bash " in result
         assert str((scripts_dir / "lint.sh").resolve()) in result
+
+    def test_uses_node_for_module_script(self, tmp_path):
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "check.mjs").write_text("console.log('ok')")
+
+        result = _resolve_script_refs("Run @script:check.mjs", scripts_dir)
+
+        assert "shell_exec" in result
+        assert "node " in result
 
     def test_preserves_missing_script(self, tmp_path):
         scripts_dir = tmp_path / "scripts"
@@ -54,6 +72,15 @@ class TestResolveScriptRefs:
         assert "@script:b.sh" not in result
         assert "@script:c.sh" in result
 
+    def test_rejects_script_reference_outside_package(self, tmp_path):
+        scripts_dir = tmp_path / "skill" / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (tmp_path / "outside.sh").write_text("echo unsafe")
+
+        result = _resolve_script_refs("Run @script:../../outside.sh", scripts_dir)
+
+        assert result == "Run @script:../../outside.sh"
+
 
 class TestLoadSkillContent:
     def test_load_directory_format(self, tmp_path):
@@ -64,6 +91,7 @@ class TestLoadSkillContent:
         result = load_skill_content(tmp_path, ["code-review"])
         assert "Code Review" in result
         assert "careful review" in result
+        assert f"Package root: {skill_dir.resolve()}" in result
 
     def test_load_single_file_format(self, tmp_path):
         (tmp_path / "gap-analysis.md").write_text("# Gap Analysis\nFind the gaps.")
@@ -114,18 +142,6 @@ class TestLoadSkillContent:
         nonexistent = tmp_path / "no-such-dir"
         result = load_skill_content(nonexistent, ["anything"])
         assert result == ""
-
-
-from unittest.mock import AsyncMock, MagicMock
-
-import pytest
-
-from axonflow.core.agent import BaseAgent
-from axonflow.core.message import Message, MessageType
-from axonflow.llm.gateway import LLMResponse
-from axonflow.messaging.memory_bus import InMemoryMessageBus
-from axonflow.tools.base import ToolRegistry
-
 
 class TestAgentSkillIntegration:
     @pytest.mark.asyncio

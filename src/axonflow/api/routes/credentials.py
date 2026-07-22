@@ -35,6 +35,22 @@ class CredentialCreateRequest(BaseModel):
         return self
 
 
+class CredentialUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    provider: str = Field(min_length=1, max_length=64)
+    source: str
+    secret: str | None = Field(default=None, min_length=1)
+    env_var: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_source(self) -> CredentialUpdateRequest:
+        if self.source == "environment" and not self.env_var:
+            raise ValueError("env_var is required for environment credentials")
+        if self.source not in {"encrypted", "environment"}:
+            raise ValueError("source must be encrypted or environment")
+        return self
+
+
 @router.get("")
 async def list_credentials() -> list[dict]:
     return get_platform_store().list_credentials()
@@ -52,6 +68,27 @@ async def create_credential(body: CredentialCreateRequest) -> dict:
         )
     except (ValueError, sqlite3.IntegrityError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.put("/{credential_id}")
+async def update_credential(
+    credential_id: str,
+    body: CredentialUpdateRequest,
+) -> dict:
+    try:
+        credential = get_platform_store().update_credential(
+            credential_id=credential_id,
+            name=body.name,
+            provider=body.provider,
+            source=body.source,
+            secret=body.secret,
+            env_var=body.env_var,
+        )
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if credential is None:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    return credential
 
 
 @router.delete("/{credential_id}", status_code=204)
