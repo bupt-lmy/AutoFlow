@@ -16,6 +16,10 @@ from axonflow.json_utils import parse_json_object
 from axonflow.llm.gateway import LLMTraceContext
 
 
+def _clip(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, value))
+
+
 def _request(message: Message) -> dict[str, Any]:
     task = message.payload.get("task")
     if isinstance(task, dict):
@@ -95,6 +99,7 @@ class VideoIngestAgent(BaseAgent):
             "description": description,
             "target_duration_seconds": request.get("target_duration_seconds", 30),
             "hard_subtitles": bool(request.get("hard_subtitles", True)),
+            "source_provenance": request.get("source_provenance"),
         }
 
     async def _health_probe(self) -> None:
@@ -129,6 +134,7 @@ class VideoSceneAnalysisAgent(BaseAgent):
             "description": message.payload.get("description"),
             "target_duration_seconds": message.payload.get("target_duration_seconds", 30),
             "hard_subtitles": message.payload.get("hard_subtitles", True),
+            "source_provenance": message.payload.get("source_provenance"),
         }
 
     async def _health_probe(self) -> None:
@@ -153,6 +159,7 @@ class VideoSceneFeatureAgent(BaseAgent):
                 "source_path": source,
                 "scenes": scenes,
                 "samples_per_scene": settings.get("samples_per_scene", 5),
+                "max_samples_per_scene": settings.get("max_samples_per_scene", 12),
                 "analysis_fps": settings.get("analysis_fps", 4),
                 "timeout": settings.get("timeout", 3600),
             },
@@ -167,6 +174,7 @@ class VideoSceneFeatureAgent(BaseAgent):
             "description": message.payload.get("description"),
             "target_duration_seconds": message.payload.get("target_duration_seconds", 30),
             "hard_subtitles": message.payload.get("hard_subtitles", True),
+            "source_provenance": message.payload.get("source_provenance"),
         }
 
     async def _health_probe(self) -> None:
@@ -211,6 +219,7 @@ class SourceTranscriptAgent(BaseAgent):
             "description": message.payload.get("description"),
             "target_duration_seconds": message.payload.get("target_duration_seconds", 30),
             "hard_subtitles": message.payload.get("hard_subtitles", True),
+            "source_provenance": message.payload.get("source_provenance"),
         }
 
     async def _health_probe(self) -> None:
@@ -235,7 +244,7 @@ class VideoHighlightScoringAgent(BaseAgent):
             cues = []
         batch_size = max(1, int(self.parameters.get("max_scenes_per_batch", 5)))
         max_images = max(1, int(self.parameters.get("max_images_per_batch", 20)))
-        max_frames = max(1, int(self.parameters.get("max_frames_per_scene", 4)))
+        max_frames = max(1, int(self.parameters.get("max_frames_per_scene", 6)))
         max_semantic_scenes = max(1, int(self.parameters.get("max_semantic_scenes", 30)))
         semantic_scenes = self._prefilter_scenes(scenes, cues, max_semantic_scenes)
         semantic_by_id: dict[str, dict[str, Any]] = {}
@@ -287,6 +296,7 @@ class VideoHighlightScoringAgent(BaseAgent):
             "hard_subtitles": request.get("hard_subtitles", True),
             "transcript_cues": cues,
             "source_transcript": request.get("source_transcript"),
+            "source_provenance": request.get("source_provenance"),
             "scenes": scored,
             "scoring_summary": {
                 "action_brief": action_brief,
@@ -330,9 +340,11 @@ class VideoHighlightScoringAgent(BaseAgent):
                 "text": (
                     "你是影视精彩度分析师。依据用户描述、按时间排列的多帧画面、同期对白及"
                     "确定性运动/音频指标，为每个镜头独立评分。无对白不是缺点；追逐、打斗、"
-                    "射门、碰撞等静音动作可获得高分。所有分数为0到1。只输出严格 JSON："
+                    "射门、碰撞等静音动作可获得高分。请同时判断动作是否完整（起势、发生、"
+                    "结果是否被这些帧覆盖）。所有分数为0到1。只输出严格 JSON："
                     '{"scene_scores":[{"scene_id":"scene-001","semantic_relevance":0.8,'
-                    '"action_confidence":0.8,"emotion_intensity":0.5,"aesthetic_quality":0.7,'
+                    '"action_confidence":0.8,"action_completeness":0.7,'
+                    '"emotion_intensity":0.5,"aesthetic_quality":0.7,'
                     '"dialogue_relevance":0.0,"reason":"..."}]}'
                     f"\n用户描述：{description}"
                 ),
@@ -360,7 +372,7 @@ class VideoHighlightScoringAgent(BaseAgent):
             frames = scene.get("sample_frames", [])
             if not isinstance(frames, list):
                 frames = []
-            for frame in frames[:max_frames_per_scene]:
+            for frame in self._select_semantic_frames(frames, max_frames_per_scene):
                 if not isinstance(frame, dict):
                     continue
                 path = Path(str(frame.get("path", "")))
@@ -369,7 +381,11 @@ class VideoHighlightScoringAgent(BaseAgent):
                 content.append(
                     {
                         "type": "text",
-                        "text": f"时间点 {int(frame.get('timestamp_ms', 0)) / 1000:.2f}s",
+                        "text": (
+                            f"时间点 {int(frame.get('timestamp_ms', 0)) / 1000:.2f}s；"
+                            f"采样角色：{frame.get('role', 'coverage')}；"
+                            f"事件强度：{float(frame.get('event_activity', 0)):.3f}"
+                        ),
                     }
                 )
                 content.append(
@@ -384,6 +400,33 @@ class VideoHighlightScoringAgent(BaseAgent):
                     }
                 )
         return content
+
+    @staticmethod
+    def _select_semantic_frames(
+        frames: list[dict[str, Any]], limit: int
+    ) -> list[dict[str, Any]]:
+        """Prefer event context and shot boundaries, then present frames in time order."""
+        priority = {
+            "primary_event_peak": 0,
+            "event_lead_in": 1,
+            "event_follow_through": 2,
+            "shot_start": 3,
+            "shot_end": 4,
+            "shot_midpoint": 5,
+            "secondary_event_peak_1": 6,
+            "secondary_event_peak_2": 7,
+            "coverage": 8,
+        }
+        usable = [frame for frame in frames if isinstance(frame, dict)]
+        selected = sorted(
+            usable,
+            key=lambda frame: (
+                priority.get(str(frame.get("role")), 9),
+                -float(frame.get("event_activity", 0)),
+                int(frame.get("timestamp_ms", 0)),
+            ),
+        )[:limit]
+        return sorted(selected, key=lambda frame: int(frame.get("timestamp_ms", 0)))
 
     @staticmethod
     def _scene_batches(
@@ -430,10 +473,11 @@ class VideoHighlightScoringAgent(BaseAgent):
 
         def activity(scene: dict[str, Any]) -> float:
             return (
-                feature(scene, "motion_intensity") * 0.5
-                + feature(scene, "visual_change") * 0.2
-                + feature(scene, "audio_impact") * 0.2
-                + feature(scene, "audio_energy") * 0.1
+                feature(scene, "event_activity_p95") * 0.45
+                + feature(scene, "motion_intensity") * 0.25
+                + feature(scene, "visual_change") * 0.10
+                + feature(scene, "audio_impact") * 0.10
+                + feature(scene, "audio_energy") * 0.10
                 - feature(scene, "freeze_ratio") * 0.05
                 - feature(scene, "black_ratio") * 0.25
             )
@@ -523,40 +567,46 @@ class VideoHighlightScoringAgent(BaseAgent):
         components = {
             "semantic_relevance": value(semantic, "semantic_relevance", 0.15),
             "action_confidence": value(semantic, "action_confidence", 0.0),
+            "action_completeness": value(semantic, "action_completeness", 0.4),
             "emotion_intensity": value(semantic, "emotion_intensity", 0.0),
             "aesthetic_quality": value(semantic, "aesthetic_quality", 0.5),
             "dialogue_relevance": value(semantic, "dialogue_relevance", 0.0),
             "motion_intensity": value(features, "motion_intensity"),
             "visual_change": value(features, "visual_change"),
             "audio_impact": value(features, "audio_impact"),
+            "event_activity": value(features, "event_activity_p95"),
         }
-        if action_brief:
-            weights = {
-                "semantic_relevance": 0.28,
-                "motion_intensity": 0.30,
-                "visual_change": 0.10,
-                "audio_impact": 0.08,
-                "emotion_intensity": 0.07,
-                "aesthetic_quality": 0.05,
-                "action_confidence": 0.12,
-            }
-        else:
-            weights = {
-                "semantic_relevance": 0.38,
-                "motion_intensity": 0.18,
-                "visual_change": 0.10,
-                "audio_impact": 0.08,
-                "emotion_intensity": 0.10,
-                "aesthetic_quality": 0.08,
-                "action_confidence": 0.08,
-            }
         penalty = value(features, "freeze_ratio") * 0.15 + value(
             features, "black_ratio"
         ) * 0.35
-        score = sum(components[key] * weight for key, weight in weights.items()) - penalty
+        relevance = (
+            components["semantic_relevance"] * 0.75
+            + components["dialogue_relevance"] * 0.25
+        )
+        excitement = (
+            components["event_activity"] * 0.28
+            + components["motion_intensity"] * 0.22
+            + components["visual_change"] * 0.08
+            + components["audio_impact"] * 0.10
+            + components["emotion_intensity"] * 0.10
+            + components["action_confidence"] * 0.12
+            + components["action_completeness"] * 0.10
+        )
+        usability = _clip(
+            components["aesthetic_quality"] * 0.65
+            + components["action_completeness"] * 0.35
+            - penalty
+        )
+        if action_brief:
+            score = relevance * 0.30 + excitement * 0.50 + usability * 0.20
+        else:
+            score = relevance * 0.50 + excitement * 0.28 + usability * 0.22
         return {
             **scene,
             **components,
+            "relevance_score": round(relevance, 4),
+            "excitement_score": round(excitement, 4),
+            "usability_score": round(usability, 4),
             "quality_penalty": round(penalty, 4),
             "highlight_score": round(max(0.0, min(1.0, score)), 4),
             "score_reason": semantic.get("reason") or "deterministic feature fallback",
@@ -693,6 +743,7 @@ class VideoHighlightSelectorAgent(BaseAgent):
             "target_duration_seconds": target_seconds,
             "hard_subtitles": message.payload.get("hard_subtitles", True),
             "selection": selection,
+            "source_provenance": message.payload.get("source_provenance"),
         }
 
     async def _health_probe(self) -> None:
@@ -717,6 +768,7 @@ class VideoHighlightSelectorAgent(BaseAgent):
         candidate_clips: list[dict[str, Any]] = []
         candidate_duration_ms = 0
         candidate_target_ms = max(round(target_seconds * 2000), round(target_seconds * 1000))
+        candidate_scene_budget_ms = max(4000, round(target_seconds * 500))
         for scene in ranked:
             if candidate_duration_ms >= candidate_target_ms:
                 break
@@ -728,7 +780,13 @@ class VideoHighlightSelectorAgent(BaseAgent):
                 "reason": scene.get("score_reason"),
             }
             candidate_clips.append(candidate)
-            candidate_duration_ms += candidate["end_ms"] - candidate["start_ms"]
+            # A single long take must not consume the whole candidate pool.
+            # Account only a bounded amount while keeping its full interval for
+            # downstream multi-peak refinement.
+            candidate_duration_ms += min(
+                candidate["end_ms"] - candidate["start_ms"],
+                candidate_scene_budget_ms,
+            )
         selected: list[dict[str, Any]] = []
         remaining_ms = round(target_seconds * 1000)
         for scene in ranked:
@@ -762,6 +820,7 @@ class VideoHighlightSelectorAgent(BaseAgent):
                 "mode": "composite_score",
                 "selected_scene_ids": [clip["scene_id"] for clip in selected],
             },
+            "source_provenance": message.payload.get("source_provenance"),
         }
 
     async def _model_selection(
@@ -845,52 +904,165 @@ class VideoIntervalRefinerAgent(BaseAgent):
         target_ms = round(float(message.payload.get("target_duration_seconds", 30)) * 1000)
         min_clip_ms = int(settings.get("min_clip_ms", 800))
         max_clip_ms = int(settings.get("max_clip_ms", 8000))
+        preferred_clip_ms = int(settings.get("preferred_clip_ms", 4000))
+        max_peaks_per_scene = int(settings.get("max_peaks_per_scene", 8))
+        max_scene_share = _clip(float(settings.get("max_scene_share", 0.6)), 0.1, 1.0)
         pre_roll_ms = int(settings.get("pre_roll_ms", 350))
         post_roll_ms = int(settings.get("post_roll_ms", 550))
-        fps = int(settings.get("fps", 30))
+        fps = float(settings.get("fps", 30))
+        fine_scan_fps = float(settings.get("fine_scan_fps", 12))
+        fine_scan_warning: str | None = None
+        fine_scan_used = False
+        fine_scan_tool = self.tool_registry.get("video_activity_scan")
+        if fine_scan_tool is not None:
+            scan_result = await self.tool_registry.execute(
+                "video_activity_scan",
+                {
+                    "source_path": source,
+                    "intervals": candidates,
+                    "analysis_fps": fine_scan_fps,
+                    "timeout": settings.get("timeout", 3600),
+                },
+            )
+            if scan_result.success:
+                scan = json.loads(scan_result.output or "{}")
+                fine_by_id = {
+                    interval.get("scene_id"): interval
+                    for interval in scan.get("intervals", [])
+                    if isinstance(interval, dict)
+                }
+                scored_scenes = [
+                    {
+                        **scene,
+                        "feature_samples": fine_by_id.get(scene.get("id"), {}).get(
+                            "feature_samples", scene.get("feature_samples", [])
+                        ),
+                    }
+                    for scene in scored_scenes
+                    if isinstance(scene, dict)
+                ]
+                source_fps = scan.get("source_fps")
+                if isinstance(source_fps, (int, float)) and source_fps > 0:
+                    fps = float(source_fps)
+                fine_scan_used = True
+            else:
+                fine_scan_warning = scan_result.error or "fine activity scan failed"
+        else:
+            fine_scan_warning = "video_activity_scan tool is not registered"
         by_id = {scene.get("id"): scene for scene in scored_scenes if isinstance(scene, dict)}
-        refined: list[dict[str, Any]] = []
-        remaining_ms = target_ms
-        reports: list[dict[str, Any]] = []
-        for candidate in candidates:
-            if remaining_ms < min_clip_ms or not isinstance(candidate, dict):
-                break
+        proposals: list[tuple[float, dict[str, Any], tuple[int, int], dict[str, Any]]] = []
+        for candidate_index, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                continue
             scene = by_id.get(candidate.get("scene_id"))
             if not isinstance(scene, dict):
                 continue
-            interval, report = self._refine_scene(
+            peaks = self._activity_peak_candidates(
                 scene,
-                min_clip_ms=min_clip_ms,
-                max_clip_ms=max_clip_ms,
-                pre_roll_ms=pre_roll_ms,
-                post_roll_ms=post_roll_ms,
-                fps=fps,
+                minimum_spacing_ms=preferred_clip_ms,
+                limit=max_peaks_per_scene,
             )
-            duration = interval[1] - interval[0]
-            if duration > remaining_ms:
-                interval = self._fit_around_peak(
-                    interval,
-                    int(report["peak_ms"]),
-                    remaining_ms,
-                    int(scene["start_ms"]),
-                    int(scene["end_ms"]),
-                    fps,
+            if not peaks:
+                peaks = [((int(scene["start_ms"]) + int(scene["end_ms"])) // 2, 0.0)]
+            for peak_ms, peak_activity in peaks:
+                interval, report = self._refine_scene(
+                    scene,
+                    min_clip_ms=min(
+                        preferred_clip_ms,
+                        int(scene["end_ms"]) - int(scene["start_ms"]),
+                    ),
+                    max_clip_ms=max_clip_ms,
+                    pre_roll_ms=pre_roll_ms,
+                    post_roll_ms=post_roll_ms,
+                    fps=fps,
+                    peak_hint_ms=peak_ms,
                 )
+                scene_score = float(
+                    scene.get("highlight_score", candidate.get("score", 0))
+                )
+                # Candidate order retains the semantic rank. Peak activity then
+                # differentiates multiple events within the same long take.
+                proposal_score = (
+                    scene_score * 0.75
+                    + peak_activity * 0.25
+                    - candidate_index * 0.001
+                )
+                proposals.append((proposal_score, scene, interval, report))
+        proposals.sort(key=lambda item: item[0], reverse=True)
+
+        refined: list[dict[str, Any]] = []
+        remaining_ms = target_ms
+        reports: list[dict[str, Any]] = []
+        selected_proposals: set[int] = set()
+        unique_scene_ids = {str(scene.get("id")) for _score, scene, _interval, _report in proposals}
+        max_scene_ms = round(target_ms * max_scene_share)
+
+        def select_pass(*, enforce_diversity: bool) -> None:
+            nonlocal remaining_ms
+            for proposal_index, (_score, scene, source_interval, source_report) in enumerate(
+                proposals
+            ):
+                if remaining_ms < min_clip_ms:
+                    return
+                if proposal_index in selected_proposals:
+                    continue
+                interval = source_interval
+                report = source_report
+                if any(
+                    clip["scene_id"] == scene.get("id")
+                    and interval[0] < clip["end_ms"]
+                    and interval[1] > clip["start_ms"]
+                    for clip in refined
+                ):
+                    continue
+                allowed_ms = remaining_ms
+                if enforce_diversity and len(unique_scene_ids) > 1:
+                    used_ms = sum(
+                        clip["end_ms"] - clip["start_ms"]
+                        for clip in refined
+                        if clip["scene_id"] == scene.get("id")
+                    )
+                    allowed_ms = min(allowed_ms, max_scene_ms - used_ms)
+                if allowed_ms < min_clip_ms:
+                    continue
                 duration = interval[1] - interval[0]
-            if duration < min_clip_ms:
-                continue
-            refined.append(
-                {
-                    "scene_id": scene.get("id"),
-                    "start_ms": interval[0],
-                    "end_ms": interval[1],
-                    "peak_ms": int(report["peak_ms"]),
-                    "score": float(scene.get("highlight_score", candidate.get("score", 0))),
-                    "reason": scene.get("score_reason") or candidate.get("reason"),
-                }
-            )
-            reports.append(report)
-            remaining_ms -= duration
+                if duration > allowed_ms:
+                    interval = self._fit_around_peak(
+                        interval,
+                        int(report["peak_ms"]),
+                        allowed_ms,
+                        int(scene["start_ms"]),
+                        int(scene["end_ms"]),
+                        fps,
+                    )
+                    duration = interval[1] - interval[0]
+                if duration < min_clip_ms:
+                    continue
+                refined.append(
+                    {
+                        "scene_id": scene.get("id"),
+                        "start_ms": interval[0],
+                        "end_ms": interval[1],
+                        "peak_ms": int(report["peak_ms"]),
+                        "score": float(scene.get("highlight_score", 0)),
+                        "reason": scene.get("score_reason"),
+                    }
+                )
+                reports.append(
+                    {
+                        **report,
+                        "refined_start_ms": interval[0],
+                        "refined_end_ms": interval[1],
+                    }
+                )
+                selected_proposals.add(proposal_index)
+                remaining_ms -= duration
+
+        select_pass(enforce_diversity=True)
+        if remaining_ms >= min_clip_ms:
+            # A one-shot source, or too few usable alternate shots, may need the
+            # remaining capacity from the best scene to still meet the duration.
+            select_pass(enforce_diversity=False)
 
         if not refined:
             return {"status": "error", "error": "No valid frame-level intervals were produced"}
@@ -904,10 +1076,16 @@ class VideoIntervalRefinerAgent(BaseAgent):
             "selected_clips": refined,
             "target_duration_seconds": target_ms / 1000,
             "hard_subtitles": message.payload.get("hard_subtitles", True),
+            "source_provenance": message.payload.get("source_provenance"),
             "refinement_report": {
                 "target_duration_ms": target_ms,
                 "actual_duration_ms": actual_ms,
                 "duration_delta_ms": actual_ms - target_ms,
+                "fine_scan_used": fine_scan_used,
+                "fine_scan_fps": fine_scan_fps if fine_scan_used else None,
+                "source_fps": fps,
+                "fine_scan_warning": fine_scan_warning,
+                "max_scene_share": max_scene_share,
                 "intervals": reports,
             },
         }
@@ -918,11 +1096,14 @@ class VideoIntervalRefinerAgent(BaseAgent):
             raise RuntimeError("refinement parameters must be an object")
         min_clip_ms = int(settings.get("min_clip_ms", 800))
         max_clip_ms = int(settings.get("max_clip_ms", 8000))
-        fps = int(settings.get("fps", 30))
+        preferred_clip_ms = int(settings.get("preferred_clip_ms", 4000))
+        fps = float(settings.get("fps", 30))
         if min_clip_ms <= 0:
             raise RuntimeError("min_clip_ms must be positive")
         if max_clip_ms < min_clip_ms:
             raise RuntimeError("max_clip_ms must be greater than or equal to min_clip_ms")
+        if not min_clip_ms <= preferred_clip_ms <= max_clip_ms:
+            raise RuntimeError("preferred_clip_ms must be between min_clip_ms and max_clip_ms")
         if fps <= 0:
             raise RuntimeError("fps must be positive")
 
@@ -935,7 +1116,8 @@ class VideoIntervalRefinerAgent(BaseAgent):
         max_clip_ms: int,
         pre_roll_ms: int,
         post_roll_ms: int,
-        fps: int,
+        fps: float,
+        peak_hint_ms: int | None = None,
     ) -> tuple[tuple[int, int], dict[str, Any]]:
         scene_start = int(scene["start_ms"])
         scene_end = int(scene["end_ms"])
@@ -947,13 +1129,21 @@ class VideoIntervalRefinerAgent(BaseAgent):
             if not isinstance(row, dict):
                 continue
             timestamp = int(row.get("timestamp_ms", scene_start))
-            difference = max(0.0, min(1.0, float(row.get("frame_difference", 0)) / 24))
-            audio = max(
-                0.0,
-                min(1.0, (float(row.get("audio_rms_db", -120)) + 60) / 60),
-            )
-            activity_rows.append((timestamp, difference * 0.75 + audio * 0.25))
-        if activity_rows:
+            if "event_activity" in row:
+                activity = _clip(float(row.get("event_activity", 0)))
+            else:
+                difference = _clip(float(row.get("frame_difference", 0)) / 24)
+                audio = _clip((float(row.get("audio_rms_db", -120)) + 60) / 60)
+                activity = difference * 0.75 + audio * 0.25
+            activity_rows.append((timestamp, activity))
+        if peak_hint_ms is not None:
+            peak_ms = max(scene_start, min(scene_end - 1, int(peak_hint_ms)))
+            peak_activity = min(
+                activity_rows,
+                key=lambda item: abs(item[0] - peak_ms),
+                default=(peak_ms, 0.0),
+            )[1]
+        elif activity_rows:
             peak_activity = max(value for _timestamp, value in activity_rows)
             peak_times = [
                 timestamp
@@ -1010,6 +1200,45 @@ class VideoIntervalRefinerAgent(BaseAgent):
         }
 
     @staticmethod
+    def _activity_peak_candidates(
+        scene: dict[str, Any],
+        *,
+        minimum_spacing_ms: int,
+        limit: int,
+    ) -> list[tuple[int, float]]:
+        rows = scene.get("feature_samples", [])
+        if not isinstance(rows, list):
+            return []
+        values: list[tuple[int, float]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            timestamp = int(row.get("timestamp_ms", scene["start_ms"]))
+            if "event_activity" in row:
+                activity = _clip(float(row.get("event_activity", 0)))
+            else:
+                motion = _clip(float(row.get("frame_difference", 0)) / 24)
+                audio = _clip((float(row.get("audio_rms_db", -120)) + 60) / 60)
+                activity = motion * 0.75 + audio * 0.25
+            values.append((timestamp, activity))
+        local: list[tuple[int, float]] = []
+        for index, value in enumerate(values):
+            left = values[index - 1][1] if index else -1.0
+            right = values[index + 1][1] if index + 1 < len(values) else -1.0
+            if value[1] >= left and value[1] >= right:
+                local.append(value)
+        selected: list[tuple[int, float]] = []
+        for candidate in sorted(local, key=lambda item: item[1], reverse=True):
+            if all(
+                abs(candidate[0] - existing[0]) >= minimum_spacing_ms
+                for existing in selected
+            ):
+                selected.append(candidate)
+                if len(selected) >= limit:
+                    break
+        return selected
+
+    @staticmethod
     def _median_spacing(rows: list[tuple[int, float]]) -> int:
         differences = [right[0] - left[0] for left, right in zip(rows, rows[1:], strict=False)]
         return max(1, round(statistics.median(differences))) if differences else 250
@@ -1033,7 +1262,7 @@ class VideoIntervalRefinerAgent(BaseAgent):
         duration_ms: int,
         scene_start: int,
         scene_end: int,
-        fps: int,
+        fps: float,
     ) -> tuple[int, int]:
         start = peak_ms - duration_ms // 2
         end = start + duration_ms
@@ -1045,7 +1274,7 @@ class VideoIntervalRefinerAgent(BaseAgent):
         return start, end
 
     @staticmethod
-    def _align_ms(value: int, fps: int) -> int:
+    def _align_ms(value: int, fps: float) -> int:
         return round(round(value * fps / 1000) * 1000 / fps)
 
 
@@ -1080,6 +1309,7 @@ class VideoHighlightRendererAgent(BaseAgent):
             "refinement_report": message.payload.get("refinement_report"),
             "description": message.payload.get("description"),
             "hard_subtitles": message.payload.get("hard_subtitles", True),
+            "source_provenance": message.payload.get("source_provenance"),
             "artifacts": [
                 {
                     "type": "file",
@@ -1162,6 +1392,7 @@ class VideoTranscriptionAgent(BaseAgent):
             "refinement_report": message.payload.get("refinement_report"),
             "description": message.payload.get("description"),
             "hard_subtitles": message.payload.get("hard_subtitles", True),
+            "source_provenance": message.payload.get("source_provenance"),
             "artifacts": [*message.payload.get("artifacts", []), subtitle_artifact],
         }
 
@@ -1190,6 +1421,7 @@ class HardSubtitleAgent(BaseAgent):
                 "subtitle": subtitle,
                 "selected_clips": message.payload.get("selected_clips", []),
                 "refinement_report": message.payload.get("refinement_report"),
+                "source_provenance": message.payload.get("source_provenance"),
                 "artifacts": message.payload.get("artifacts", []),
             }
         result = await self.tool_registry.execute(
@@ -1216,6 +1448,7 @@ class HardSubtitleAgent(BaseAgent):
             "subtitle": subtitle,
             "selected_clips": message.payload.get("selected_clips", []),
             "refinement_report": message.payload.get("refinement_report"),
+            "source_provenance": message.payload.get("source_provenance"),
             "artifacts": [*message.payload.get("artifacts", []), final_artifact],
         }
 

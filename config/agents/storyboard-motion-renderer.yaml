@@ -1,0 +1,16 @@
+agent:
+  id: agent-storyboard-motion-renderer
+  name: "分镜动态运镜合成器"
+  role: "使用 FFmpeg 为多张分镜加入推拉摇移和镜间交叉淡化，输出真实逐帧变化的视频。"
+  agent_type: custom
+  class_path: axonflow.agents.generated_video.StoryboardMotionRendererAgent
+  tools: [storyboard_motion_render]
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    render:
+      transition_seconds: 0.4
+      width: 1920
+      height: 1080
+      fps: 30
+      timeout: 1800

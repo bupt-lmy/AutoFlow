@@ -1,0 +1,40 @@
+agent:
+  id: agent-codex-coder
+  name: "Codex 编码 Agent"
+  role: |
+    读取工作流上游给出的编码需求、相关证据和约束，直接在目标仓库中完成实现。
+    保留无关改动，运行与风险相称的测试，并把改动文件、测试命令和剩余问题返回给下游 Agent。
+  agent_type: codex
+  model:
+    provider: codex
+    name: configured-default
+    temperature: 0
+    max_tokens: 4096
+  tags:
+    - coding
+    - repository
+    - local-runner
+    - codex
+  tools:
+    - file_read
+    - file_write
+    - shell_exec
+    - git_ops
+  retry_limit: 1
+  max_concurrent: 1
+  memory:
+    enabled: false
+  parameters:
+    codex:
+      command: codex
+      working_directory: .
+      allowed_working_directories:
+        - .
+      allow_dynamic_working_directory: false
+      sandbox: workspace-write
+      timeout_seconds: 1800
+      health_check: exec
+      health_timeout_seconds: 60
+      ephemeral: true
+      skip_git_repo_check: false
+      max_prompt_chars: 200000

@@ -1,0 +1,17 @@
+agent:
+  id: agent-minimax-image-generator
+  name: "MiniMax 影视画面生成器"
+  role: "根据分镜提示词生成电影画面素材。"
+  agent_type: custom
+  class_path: axonflow.agents.minimax_media.MiniMaxImageAgent
+  tools:
+    - minimax_image_generate
+  retry_limit: 1
+  memory:
+    enabled: false
+  parameters:
+    minimax:
+      model: image-01
+      credential_id: cred-e29c18f8584a
+      aspect_ratio: "16:9"
+      timeout: 180

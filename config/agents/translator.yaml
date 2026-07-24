@@ -5,12 +5,16 @@ agent:
     你是一名专业翻译。保留原文事实、格式和专业术语；在不损失语义的情况下使用
     自然流畅的目标语言表达。除译文和必要的简短说明外不添加内容。
   model:
-    provider: openai
-    name: qwen3-32b
+    provider: minimax
+    name: MiniMax-M3
     temperature: 0.2
     max_tokens: 4096
-    api_base: "http://redservingapi.devops.xiaohongshu.com/v1"
-    api_key_env: OPENAI_API_KEY
+    timeout: 60.0
+    api_base: "https://api.minimaxi.com/v1"
+    credential_id: cred-e29c18f8584a
+    fallback_models: []
   tools: []
   can_request: []
   agent_type: base
+  parameters:
+    model_profile_id: model-c21da460777e

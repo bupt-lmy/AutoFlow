@@ -92,6 +92,22 @@ URL 导入依赖 `yt-dlp`。自动转写可选依赖 `whisper-cli` 和
 `workspace/models/ggml-small.bin`；缺失时工作流继续完成纯视觉选片，并生成基于选片原因的
 旁路 SRT。输出写入 `workspace/media/final/`，通过技术质检后才登记。
 
+`movie-title-video-edit` 在上述剪辑链路前增加“片名解析 → 官方视频搜索 → 可信频道过滤
+→ 授权门禁”。官方宣传素材默认只允许 `internal_demo`；用户自有素材、发布和商业用途必须
+显式传入 `rights_confirmed: true`。来源、频道、授权依据和发布许可会随成片保存：
+
+```bash
+axonflow run movie-title-video-edit --input \
+  '{"title":"复仇者联盟3","description":"选择灭霸、英雄集结和战斗高潮","target_duration_seconds":30,"usage":"internal_demo"}'
+```
+
+也可以提供有权处理的完整影片文件，此时不会执行公网资源搜索：
+
+```bash
+axonflow run movie-title-video-edit --input \
+  '{"title":"复仇者联盟3","authorized_source":"/absolute/path/movie.mp4","rights_confirmed":true,"description":"选择瓦坎达战斗高潮"}'
+```
+
 文本生成视频使用独立的 `text-to-video-generation` 工作流，不读取或剪切已有视频。默认后端
 不需要 MiniMax 视频生成额度，执行“可选开放资源搜索 → M3 连续动作分镜规划 → image-01
 生成四张关键帧 → FFmpeg 推拉摇移与交叉淡化 → 永久 AI 虚构标识 → H.264/AAC 标准化

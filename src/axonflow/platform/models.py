@@ -16,6 +16,7 @@ from axonflow.config.models import (
     AgentInstanceConfig,
     DiscoveryConfig,
     FlowConfig,
+    HostingConfig,
     Route,
     RouteCondition,
     TriggerConfig,
@@ -129,6 +130,7 @@ class PlatformWorkflow(BaseModel):
     mode: str = "flat"
     terminate_on: list[dict[str, Any]] = Field(default_factory=list)
     supervisor: dict[str, Any] | None = None
+    hosting: HostingConfig = Field(default_factory=HostingConfig)
 
     @model_validator(mode="after")
     def validate_graph(self) -> PlatformWorkflow:
@@ -292,6 +294,7 @@ class PlatformWorkflow(BaseModel):
             mode=config.flow.mode,
             terminate_on=config.flow.terminate_on,
             supervisor=supervisor,
+            hosting=config.hosting,
         )
 
     def to_workflow_config(self) -> WorkflowConfig:
@@ -404,6 +407,7 @@ class PlatformWorkflow(BaseModel):
                 terminate_on=terminate_on,
                 supervisor=supervisor,
             ),
+            hosting=self.hosting,
             context=context,
         )
 

@@ -1,0 +1,10 @@
+agent:
+  id: agent-media-asset-manifest
+  name: "影视生成素材汇总器"
+  role: "校验图片、旁白、配乐三个分支，并输出统一素材清单。"
+  agent_type: custom
+  class_path: axonflow.agents.media.MediaAssetManifestAgent
+  tools: []
+  retry_limit: 1
+  memory:
+    enabled: false

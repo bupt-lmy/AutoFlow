@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from axonflow.api.deps import (
     set_config_dir,
     set_engine,
+    set_hosting_manager,
     set_media_storage,
     set_platform_store,
     set_render_job_runner,
@@ -31,12 +33,14 @@ from axonflow.api.routes import (
     system,
     workflows,
 )
+from axonflow.api.workflow_execution import execute_platform_workflow_run
 from axonflow.api.ws import broadcaster
 from axonflow.config.loader import load_global_config
 from axonflow.engine import AxonFlowEngine
 from axonflow.media.jobs import RenderJobRunner
 from axonflow.media.storage import LocalMediaStorage
 from axonflow.observability.execution_log import ExecutionLogEntry
+from axonflow.platform.hosting import HostedWorkflowManager
 from axonflow.platform.store import PlatformStore
 
 logger = structlog.get_logger()
@@ -109,6 +113,23 @@ async def lifespan(app: FastAPI):
     await engine.start()
     set_engine(engine)
 
+    async def _run_hosted_cycle(workflow_id: str, input_data: str, cycle: int):
+        workflow = platform_store.get_workflow(workflow_id)
+        if workflow is None:
+            raise ValueError(f"Workflow not found: {workflow_id}")
+        run_id = f"hosted-{cycle}-{uuid.uuid4().hex[:8]}"
+        return await execute_platform_workflow_run(
+            engine,
+            platform_store,
+            workflow,
+            input_data,
+            run_id,
+        )
+
+    hosting_manager = HostedWorkflowManager(platform_store, _run_hosted_cycle)
+    set_hosting_manager(hosting_manager)
+    await hosting_manager.resume()
+
     # Wire ExecutionLogger -> WebSocket broadcaster
     if engine._execution_logger is not None:
         loop = asyncio.get_running_loop()
@@ -118,6 +139,7 @@ async def lifespan(app: FastAPI):
     logger.info("api.started", config_dir=str(config_dir))
     yield
 
+    await hosting_manager.shutdown()
     await render_job_runner.shutdown()
     await engine.stop()
     platform_store.close()

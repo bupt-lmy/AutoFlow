@@ -1,0 +1,16 @@
+agent:
+  id: agent-minimax-music-generator
+  name: "MiniMax 影视配乐生成器"
+  role: "根据影片风格、情绪和场景生成无人声背景音乐素材。"
+  agent_type: custom
+  class_path: axonflow.agents.minimax_media.MiniMaxMusicAgent
+  tools:
+    - minimax_music_generate
+  retry_limit: 1
+  memory:
+    enabled: false
+  parameters:
+    minimax:
+      model: music-2.6
+      credential_id: cred-e29c18f8584a
+      timeout: 300

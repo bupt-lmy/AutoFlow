@@ -1,0 +1,102 @@
+workflow:
+  id: movie-title-video-edit
+  name: "根据影视名称发现官方资源并智能剪辑"
+  trigger:
+    type: manual
+  agents:
+    - agent-movie-title-resolver
+    - agent-official-media-discovery
+    - agent-media-rights-gate
+    - agent-video-ingest
+    - agent-video-scene-analysis
+    - agent-video-scene-features
+    - agent-source-transcript
+    - agent-video-highlight-scoring
+    - agent-video-highlight-selector
+    - agent-video-interval-refiner
+    - agent-video-highlight-renderer
+    - agent-video-transcription
+    - agent-hard-subtitle
+    - agent-media-quality
+    - agent-media-asset-register
+  flow:
+    mode: flat
+    entry: agent-movie-title-resolver
+    max_iterations: 18
+    timeout: 7200
+    routes:
+      agent-movie-title-resolver:
+        - target: agent-official-media-discovery
+          condition: {field: status, operator: eq, value: success}
+      agent-official-media-discovery:
+        - target: agent-media-rights-gate
+          condition: {field: status, operator: eq, value: success}
+      agent-media-rights-gate:
+        - target: agent-video-ingest
+          condition: {field: status, operator: eq, value: success}
+      agent-video-ingest:
+        - target: agent-video-scene-analysis
+          condition: {field: status, operator: eq, value: success}
+      agent-video-scene-analysis:
+        - target: agent-video-scene-features
+          condition: {field: status, operator: eq, value: success}
+        - target: agent-source-transcript
+          condition: {field: status, operator: eq, value: success}
+      agent-video-scene-features:
+        - target: agent-video-highlight-scoring
+          condition: {field: status, operator: eq, value: success}
+      agent-source-transcript:
+        - target: agent-video-highlight-scoring
+          condition: {field: status, operator: eq, value: success}
+      agent-video-highlight-scoring:
+        - target: agent-video-highlight-selector
+          condition: {field: status, operator: eq, value: success}
+      agent-video-highlight-selector:
+        - target: agent-video-interval-refiner
+          condition: {field: status, operator: eq, value: success}
+      agent-video-interval-refiner:
+        - target: agent-video-highlight-renderer
+          condition: {field: status, operator: eq, value: success}
+      agent-video-highlight-renderer:
+        - target: agent-video-transcription
+          condition: {field: status, operator: eq, value: success}
+      agent-video-transcription:
+        - target: agent-hard-subtitle
+          condition: {field: status, operator: eq, value: success}
+      agent-hard-subtitle:
+        - target: agent-media-quality
+          condition: {field: status, operator: eq, value: success}
+      agent-media-quality:
+        - target: agent-media-asset-register
+          condition: {field: status, operator: eq, value: success}
+    terminate_on:
+      - {agent: agent-media-asset-register, status: success}
+      - {agent: agent-movie-title-resolver, status: error}
+      - {agent: agent-official-media-discovery, status: error}
+      - {agent: agent-media-rights-gate, status: error}
+      - {agent: agent-video-ingest, status: error}
+      - {agent: agent-video-scene-analysis, status: error}
+      - {agent: agent-video-scene-features, status: error}
+      - {agent: agent-source-transcript, status: error}
+      - {agent: agent-video-highlight-scoring, status: error}
+      - {agent: agent-video-highlight-selector, status: error}
+      - {agent: agent-video-interval-refiner, status: error}
+      - {agent: agent-video-highlight-renderer, status: error}
+      - {agent: agent-video-transcription, status: error}
+      - {agent: agent-hard-subtitle, status: error}
+      - {agent: agent-media-quality, status: error}
+      - {agent: agent-media-asset-register, status: error}
+    join:
+      agent-video-highlight-scoring:
+        wait_for: [agent-video-scene-features, agent-source-transcript]
+        strategy: all
+  context:
+    input_contract:
+      title: "影视名称、简称或原名，例如：复仇者联盟3"
+      description: "希望剪出的内容；省略时自动生成精彩片段要求"
+      target_duration_seconds: 30
+      hard_subtitles: true
+      usage: "internal_demo（默认）/ publish / commercial"
+      authorized_source: "可选：用户有权处理的本地文件或 URL"
+      rights_confirmed: "发布、商业用途或自有来源必须显式设置 true"
+    output: "带来源溯源、授权决策、多帧语义评分和帧级精修的 H.264/AAC 成片"

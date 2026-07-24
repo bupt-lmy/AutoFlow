@@ -1,0 +1,68 @@
+workflow:
+  id: video-asset-generation-minimax
+  name: "MiniMax 影视素材生成"
+  trigger:
+    type: manual
+  agents:
+    - agent-minimax-creative-brief-planner
+    - agent-minimax-image-generator
+    - agent-minimax-narration-generator
+    - agent-minimax-music-generator
+    - agent-media-asset-manifest
+    - agent-subtitle-generator
+    - agent-media-composer
+    - agent-media-quality
+    - agent-media-asset-register
+  flow:
+    mode: flat
+    entry: agent-minimax-creative-brief-planner
+    max_iterations: 10
+    timeout: 1800
+    routes:
+      agent-minimax-creative-brief-planner:
+        - target: agent-minimax-image-generator
+          condition: {field: status, operator: eq, value: success}
+          payload_mapping:
+            include: [image_prompt]
+        - target: agent-minimax-narration-generator
+          condition: {field: status, operator: eq, value: success}
+          payload_mapping:
+            include: [narration]
+        - target: agent-minimax-music-generator
+          condition: {field: status, operator: eq, value: success}
+          payload_mapping:
+            include: [music_prompt]
+      agent-minimax-image-generator:
+        - target: agent-media-asset-manifest
+          condition: {field: status, operator: eq, value: success}
+      agent-minimax-narration-generator:
+        - target: agent-media-asset-manifest
+          condition: {field: status, operator: eq, value: success}
+      agent-minimax-music-generator:
+        - target: agent-media-asset-manifest
+          condition: {field: status, operator: eq, value: success}
+      agent-media-asset-manifest:
+        - target: agent-subtitle-generator
+          condition: {field: status, operator: eq, value: success}
+      agent-subtitle-generator:
+        - target: agent-media-composer
+          condition: {field: status, operator: eq, value: success}
+      agent-media-composer:
+        - target: agent-media-quality
+          condition: {field: status, operator: eq, value: success}
+      agent-media-quality:
+        - target: agent-media-asset-register
+          condition: {field: status, operator: eq, value: success}
+    join:
+      agent-media-asset-manifest:
+        wait_for:
+          - agent-minimax-image-generator
+          - agent-minimax-narration-generator
+          - agent-minimax-music-generator
+        strategy: all
+    terminate_on:
+      - {agent: agent-media-asset-register, status: success}
+  context:
+    media_contract_version: "1.0"
+    provider: minimax
+    outputs: [image, narration, music, subtitle, composed_video, quality_report, registered_asset]

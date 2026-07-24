@@ -1,0 +1,58 @@
+agent:
+  id: agent-product-manager
+  name: "产品改进 Agent"
+  role: |
+    你负责检查 AxonFlow 当前实现与运行状态，找出一个最值得修复且可在单次编码中完成的问题。
+    必须先收集代码、测试、文档或运行时证据；只提出任务，不修改任何文件。
+    严格遵守 product-audit Skill 的 JSON 输出契约。
+  agent_type: custom
+  class_path: axonflow.agents.structured.StructuredResultAgent
+  model:
+    provider: minimax
+    name: MiniMax-M3
+    temperature: 0.1
+    max_tokens: 4096
+    timeout: 90.0
+    api_base: "https://api.minimaxi.com/v1"
+    credential_id: cred-e29c18f8584a
+    fallback_models: []
+  tags:
+    - product
+    - repository-audit
+    - self-optimization
+  tools:
+    - directory_tree
+    - text_search
+    - file_read
+    - shell_exec
+    - http_request
+  skills:
+    - product-audit
+  retry_limit: 2
+  max_concurrent: 1
+  memory:
+    enabled: true
+    backend: in_memory
+    max_records: 500
+    scopes:
+      - agent
+      - workflow
+  parameters:
+    model_profile_id: model-c21da460777e
+    max_tool_rounds: 16
+    structured_result:
+      strict: true
+      verdict_field: verdict
+      success_values:
+        - proposed
+      error_values:
+        - blocked
+      promote_fields:
+        - task
+        - problem
+        - evidence
+        - requirements
+        - acceptance_criteria
+        - risk
+        - affected_areas
+        - out_of_scope

@@ -61,6 +61,12 @@ class PlatformStore:
                     completed_at TEXT,
                     result TEXT
                 );
+                CREATE TABLE IF NOT EXISTS workflow_hosting (
+                    workflow_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS node_runs (
                     run_id TEXT NOT NULL,
                     node_id TEXT NOT NULL,
@@ -339,6 +345,58 @@ class PlatformStore:
                 (status, _now(), json.dumps(result, ensure_ascii=False), run_id),
             )
             self._connection.commit()
+
+    def save_hosting_state(
+        self,
+        workflow_id: str,
+        status: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist the latest hosted-loop state for restart recovery and UI polling."""
+        state = {
+            **payload,
+            "workflow_id": workflow_id,
+            "status": status,
+            "updated_at": _now(),
+        }
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO workflow_hosting(workflow_id, status, payload, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(workflow_id) DO UPDATE SET
+                  status = excluded.status,
+                  payload = excluded.payload,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    workflow_id,
+                    status,
+                    json.dumps(state, ensure_ascii=False),
+                    state["updated_at"],
+                ),
+            )
+            self._connection.commit()
+        return state
+
+    def get_hosting_state(self, workflow_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM workflow_hosting WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def list_active_hosting_states(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT payload FROM workflow_hosting
+                WHERE status IN ('running', 'stopping')
+                ORDER BY updated_at
+                """
+            ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
 
     def create_credential(
         self,

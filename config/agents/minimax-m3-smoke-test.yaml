@@ -10,7 +10,10 @@ agent:
     max_tokens: 512
     timeout: 60
     api_base: "https://api.minimaxi.com/v1"
-    api_key_env: MINIMAX_API_KEY
+    credential_id: cred-e29c18f8584a
+    fallback_models: []
   tools: []
   can_request: []
   agent_type: base
+  parameters:
+    model_profile_id: model-c21da460777e

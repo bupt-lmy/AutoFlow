@@ -1,0 +1,4 @@
+interface:
+  display_name: "Requirement Gate"
+  short_description: "Review proposed work before implementation"
+  default_prompt: "Use $requirement-gate to approve, reject, or refine a proposed task."

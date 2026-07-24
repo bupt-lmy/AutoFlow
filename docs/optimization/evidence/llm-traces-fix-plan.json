@@ -1,0 +1,22 @@
+{
+  "url": "http://127.0.0.1:5173/observability",
+  "timeout_ms": 20000,
+  "actions": [
+    {
+      "type": "expect_text",
+      "text": "LLM Traces"
+    },
+    {
+      "type": "expect_text",
+      "text": "Include health probes"
+    },
+    {
+      "type": "expect_text",
+      "text": "agent-acceptance-tester"
+    },
+    {
+      "type": "screenshot",
+      "path": "docs/optimization/evidence/llm-traces-fix.png"
+    }
+  ]
+}

@@ -1,6 +1,7 @@
-import {} from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { ConfigProvider, theme } from 'antd';
+import zhCN from 'antd/locale/zh_CN';
+import type { Locale } from 'antd/es/locale';
 import MainLayout from './layouts/MainLayout';
 import Dashboard from './pages/Dashboard';
 import Workflows from './pages/Workflows';
@@ -14,9 +15,11 @@ import Settings from './pages/Settings';
 import Observability from './pages/Observability';
 import Skills from './pages/Skills';
 
+const zhCNLocale = (zhCN as Locale & { default?: Locale }).default || zhCN;
+
 export default function App() {
   return (
-    <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm }}>
+    <ConfigProvider locale={zhCNLocale} theme={{ algorithm: theme.defaultAlgorithm }}>
       <BrowserRouter>
         <Routes>
           <Route element={<MainLayout />}>

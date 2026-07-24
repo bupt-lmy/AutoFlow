@@ -17,7 +17,7 @@ agent:
   retry_limit: 1
   memory: {enabled: false}
   parameters:
-    max_scenes_per_batch: 5
+    max_scenes_per_batch: 3
     max_images_per_batch: 20
-    max_frames_per_scene: 4
+    max_frames_per_scene: 6
     max_semantic_scenes: 30

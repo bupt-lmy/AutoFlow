@@ -1,0 +1,11 @@
+agent:
+  id: agent-media-renderer
+  name: "确定性视频渲染器"
+  role: "执行已校验 Timeline，不修改剪辑决策。"
+  agent_type: custom
+  class_path: axonflow.agents.media.MediaRendererAgent
+  tools:
+    - media_render
+  retry_limit: 1
+  memory:
+    enabled: false

@@ -1,0 +1,14 @@
+agent:
+  id: agent-generated-video-disclosure
+  name: "AI 生成视频标识与交付器"
+  role: "标准化生成视频，补充 AAC 音轨，并永久烧录 AI GENERATED - FICTIONAL 虚构内容标识。"
+  agent_type: custom
+  class_path: axonflow.agents.generated_video.GeneratedVideoDisclosureAgent
+  tools: [generated_video_finalize]
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    delivery:
+      width: 1920
+      height: 1080
+      fps: 30

@@ -1,6 +1,6 @@
 const BASE = '';
 
-export async function fetchApi<T = any>(path: string, options?: RequestInit): Promise<T> {
+export async function fetchApi<T = unknown>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { 'Content-Type': 'application/json', ...options?.headers },
     ...options,

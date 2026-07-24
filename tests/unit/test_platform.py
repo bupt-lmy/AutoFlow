@@ -244,9 +244,7 @@ def test_fixed_agent_node_round_trips_failover_policy() -> None:
     assert instance.template_id == "primary-coder"
     assert instance.fallback_discovery is not None
     assert instance.fallback_discovery.required_tools == ["file_write"]
-    assert restored.nodes[0].config["fallback_discovery"]["description"].startswith(
-        "Implement"
-    )
+    assert restored.nodes[0].config["fallback_discovery"]["description"].startswith("Implement")
 
 
 def test_supervisor_configuration_round_trips_with_canvas_node_identity() -> None:
@@ -274,6 +272,11 @@ def test_supervisor_configuration_round_trips_with_canvas_node_identity() -> Non
             "capabilities": ["quality review", "failure recovery"],
             "planning_enabled": True,
             "intervention_on_failure": True,
+            "acceptance_criteria": ["Tests pass"],
+            "require_terminal_candidate": True,
+            "require_evidence": True,
+            "max_attempts_per_agent": 5,
+            "max_repeated_decisions": 3,
         },
     )
 
@@ -283,9 +286,13 @@ def test_supervisor_configuration_round_trips_with_canvas_node_identity() -> Non
     assert runtime.flow.supervisor is not None
     assert runtime.flow.supervisor.agent_id == "supervised-review--node-supervisor"
     assert runtime.flow.supervisor.capabilities == ["quality review", "failure recovery"]
+    assert runtime.flow.supervisor.acceptance_criteria == ["Tests pass"]
+    assert runtime.flow.supervisor.require_evidence is True
+    assert runtime.flow.supervisor.max_attempts_per_agent == 5
     assert restored.supervisor is not None
     assert restored.supervisor["agent_id"] == "node-supervisor"
     assert restored.supervisor["responsibility"].startswith("Review every")
+    assert restored.supervisor["max_repeated_decisions"] == 3
 
 
 def test_store_persists_workflow_runs_nodes_and_events(tmp_path) -> None:

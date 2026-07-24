@@ -37,6 +37,9 @@ logs/*.jsonl
 workspace/*
 !workspace/.gitkeep
 
+# Generated media previews (browser acceptance evidence is kept separately)
+/artifacts/*.jpg
+
 # Redis dump
 dump.rdb
 

@@ -52,6 +52,7 @@ from axonflow.tools.minimax_media import (
     MiniMaxSpeechGenerateTool,
     MiniMaxVideoGenerateTool,
 )
+from axonflow.tools.official_video_search import OfficialVideoSearchTool
 from axonflow.tools.process_manager import ProcessManagerTool
 from axonflow.tools.python_eval import PythonEvalTool
 from axonflow.tools.shell_exec import ShellExecTool
@@ -65,7 +66,7 @@ from axonflow.tools.video_edit import (
     VideoSceneDetectTool,
     VideoTranscribeTool,
 )
-from axonflow.tools.video_features import VideoSceneFeatureTool
+from axonflow.tools.video_features import VideoActivityScanTool, VideoSceneFeatureTool
 from axonflow.tools.web_scrape import WebScrapeTool
 from axonflow.tools.web_search import WebSearchTool
 
@@ -231,6 +232,7 @@ class AxonFlowEngine:
         self._tool_registry.register(HttpRequestTool())
         # 新增工具
         self._tool_registry.register(WebSearchTool())
+        self._tool_registry.register(OfficialVideoSearchTool())
         self._tool_registry.register(WebScrapeTool())
         self._tool_registry.register(TextSearchTool())
         self._tool_registry.register(PythonEvalTool())
@@ -262,6 +264,7 @@ class AxonFlowEngine:
         self._tool_registry.register(
             VideoSceneFeatureTool(output_dir=workspace_dir / "media" / "scene-features")
         )
+        self._tool_registry.register(VideoActivityScanTool())
         self._tool_registry.register(
             HighlightRenderTool(output_dir=workspace_dir / "media" / "highlights")
         )

@@ -1,0 +1,50 @@
+agent:
+  id: agent-text-video-prompt-planner
+  name: "文生视频镜头导演"
+  role: |
+    你负责把用户语言或文本描述改写成可生成的连续动作分镜。
+    默认 generation_backend 为 storyboard：输出 4 个 shot_prompts，每个提示词都必须独立完整地
+    重复主体外观、服装、场地、画面风格和前后动作状态，以提高跨图一致性。四镜应依次表现
+    动作建立、关键动作、结果反应、情绪特写；不得只是四张几乎相同的肖像。
+    storyboard 的 duration 必须沿用 requested_duration（默认 6），代码会根据镜头数与转场精确计算
+    shot_duration_seconds；你仍需输出该字段供审阅，但不得自行缩短用户请求时长。
+    仅当输入明确 requested_backend 为 hailuo 时，generation_backend 才设为 hailuo，并提供
+    可由 Hailuo 直接生成的 video_prompt；duration 只能为 6 或 10，resolution 为 768P 或 1080P。
+    涉及真实公众人物时，必须把它写成明显的虚构、讽刺或戏仿 AI 场景，不得声称事件真实发生，
+    requires_disclosure 必须为 true。最终成片还会永久显示 AI GENERATED - FICTIONAL 标识。
+    只输出一个严格 JSON 对象：
+    {"verdict":"passed","project_title":"...","generation_backend":"storyboard",
+    "shot_prompts":["...","...","...","..."],"shot_duration_seconds":2.0,
+    "video_prompt":"...","duration":6,"resolution":"768P","requires_disclosure":true,
+    "safety_notes":"...","summary":"..."}
+  agent_type: custom
+  class_path: axonflow.agents.structured.StructuredResultAgent
+  model:
+    provider: minimax
+    name: MiniMax-M3
+    temperature: 0.2
+    max_tokens: 4096
+    timeout: 180
+    api_base: https://api.minimaxi.com/v1
+    credential_id: cred-e29c18f8584a
+    fallback_models: [MiniMax-M2.7]
+  tools: []
+  retry_limit: 2
+  memory: {enabled: false}
+  parameters:
+    structured_result:
+      strict: true
+      verdict_field: verdict
+      success_values: [passed]
+      error_values: [failed, blocked]
+      promote_fields:
+        - project_title
+        - generation_backend
+        - shot_prompts
+        - shot_duration_seconds
+        - video_prompt
+        - duration
+        - resolution
+        - requires_disclosure
+        - safety_notes
+        - summary

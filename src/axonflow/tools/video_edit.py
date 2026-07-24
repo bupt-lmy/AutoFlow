@@ -109,7 +109,7 @@ class VideoIngestTool(Tool):
 
 
 class VideoSceneDetectTool(Tool):
-    """Detect shot boundaries and extract one representative frame per scene."""
+    """Detect shot boundaries without discarding short or overflow shots."""
 
     name = "video_scene_detect"
     description = "使用 FFmpeg 场景变化检测切分镜头，并为每个镜头提取中间关键帧"
@@ -175,44 +175,65 @@ class VideoSceneDetectTool(Tool):
                 for match in re.findall(r"lavfi\.scd\.time[:=]\s*([0-9.]+)", text)
             }
         )
-        boundaries = [0, *[cut for cut in cuts if min_scene_ms <= cut < duration_ms], duration_ms]
+        boundaries = [0, *[cut for cut in cuts if 0 < cut < duration_ms], duration_ms]
         all_ranges = [
             (index, start, end)
             for index, (start, end) in enumerate(zip(boundaries, boundaries[1:], strict=False), 1)
-            if end - start >= min_scene_ms
+            if end > start
         ]
-        if len(all_ranges) > max_scenes:
-            sample_indexes = {
-                round(index * (len(all_ranges) - 1) / (max_scenes - 1))
-                for index in range(max_scenes)
-            }
-            scene_ranges = [all_ranges[index] for index in sorted(sample_indexes)]
-        else:
-            scene_ranges = all_ranges
+        # max_scenes is now a capacity warning, not a sampling limit. Uniformly
+        # dropping shots here used to make short action beats permanently
+        # invisible to every downstream scorer.
+        scene_ranges = all_ranges
         scenes: list[dict[str, Any]] = []
         keyframe_dir = self.output_dir / f"scenes-{uuid.uuid4().hex[:12]}"
         keyframe_dir.mkdir(parents=True, exist_ok=True)
-        for original_index, start, end in scene_ranges:
-            scene_id = f"scene-{original_index:03d}"
-            keyframe = keyframe_dir / f"{scene_id}.jpg"
-            extracted = await self._extract_frame(source, (start + end) / 2000, keyframe)
-            if not extracted:
-                continue
-            scenes.append(
-                {
+        semaphore = asyncio.Semaphore(8)
+
+        async def build_scene(
+            original_index: int, start: int, end: int
+        ) -> dict[str, Any] | None:
+            async with semaphore:
+                scene_id = f"scene-{original_index:03d}"
+                keyframe = keyframe_dir / f"{scene_id}.jpg"
+                extracted = await self._extract_frame(source, (start + end) / 2000, keyframe)
+                if not extracted:
+                    return None
+                return {
                     "id": scene_id,
                     "start_ms": start,
                     "end_ms": end,
                     "duration_ms": end - start,
+                    "short_shot": end - start < min_scene_ms,
                     "keyframe_path": str(keyframe),
                 }
+
+        detected = await asyncio.gather(
+            *(
+                build_scene(original_index, start, end)
+                for original_index, start, end in scene_ranges
             )
+        )
+        scenes = [scene for scene in detected if scene is not None]
         if not scenes:
             return ToolResult(success=False, error="No usable video scenes were detected")
         return ToolResult(
             success=True,
             output=json.dumps(
-                {"source_path": str(source), "duration_ms": duration_ms, "scenes": scenes},
+                {
+                    "source_path": str(source),
+                    "duration_ms": duration_ms,
+                    "scenes": scenes,
+                    "scene_detection": {
+                        "detected_scene_count": len(all_ranges),
+                        "short_scene_count": sum(
+                            end - start < min_scene_ms for _index, start, end in all_ranges
+                        ),
+                        "recommended_max_scenes": max_scenes,
+                        "capacity_warning": len(all_ranges) > max_scenes,
+                        "discarded_scene_count": 0,
+                    },
+                },
                 ensure_ascii=False,
             ),
         )

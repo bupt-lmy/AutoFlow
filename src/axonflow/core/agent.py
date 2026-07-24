@@ -48,6 +48,30 @@ class AgentHealthState(StrEnum):
     UNHEALTHY = "unhealthy"
 
 
+class _ConcurrencyLimiter:
+    """A resizable async capacity limiter for Agent deliveries."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._in_use = 0
+        self._condition = asyncio.Condition()
+
+    async def acquire(self) -> None:
+        async with self._condition:
+            await self._condition.wait_for(lambda: self._in_use < self._limit)
+            self._in_use += 1
+
+    async def release(self) -> None:
+        async with self._condition:
+            self._in_use = max(0, self._in_use - 1)
+            self._condition.notify_all()
+
+    async def resize(self, limit: int) -> None:
+        async with self._condition:
+            self._limit = limit
+            self._condition.notify_all()
+
+
 class BaseAgent:
     """智能体基类
 
@@ -83,6 +107,13 @@ class BaseAgent:
         self.health_latency_ms: int | None = None
         self._health_lock = asyncio.Lock()
         self.parameters: dict[str, Any] = config.parameters
+        self._running = False
+        self._dispatch_slots = _ConcurrencyLimiter(config.max_concurrent)
+        self._inflight_tasks: set[asyncio.Task[None]] = set()
+        self._workflow_locks: dict[str, asyncio.Lock] = {}
+        self._active_workflows: set[str] = set()
+        self._active_task_count = 0
+        self._activity_lock = asyncio.Lock()
 
         # 记忆系统
         self.memory: MemoryStore = memory_store or InMemoryStore()
@@ -105,45 +136,135 @@ class BaseAgent:
         return self._contexts.get(workflow_id)
 
     async def start(self) -> None:
-        """启动 Agent 消息监听循环"""
+        """Start the bounded dispatcher for this Agent."""
+        if self._running:
+            return
+        self._running = True
         self.state = AgentState.RUNNING
-        logger.info("agent.started", agent_id=self.id, name=self.name)
+        logger.info(
+            "agent.started",
+            agent_id=self.id,
+            name=self.name,
+            max_concurrent=self.config.max_concurrent,
+        )
 
-        while self.state == AgentState.RUNNING:
-            try:
-                message = await self.message_bus.receive(self.id)
+        try:
+            while self._running:
+                await self._dispatch_slots.acquire()
+                if not self._running:
+                    await self._dispatch_slots.release()
+                    break
+                try:
+                    message = await self.message_bus.receive(self.id)
+                except asyncio.CancelledError:
+                    await self._dispatch_slots.release()
+                    raise
+                except Exception:
+                    await self._dispatch_slots.release()
+                    raise
                 if message is None:
+                    await self._dispatch_slots.release()
                     continue
 
-                self.state = AgentState.WORKING
-                logger.info(
-                    "agent.processing",
-                    agent_id=self.id,
-                    msg_type=message.type.value,
-                    sender=message.sender,
-                    workflow_id=message.workflow_id,
+                task = asyncio.create_task(
+                    self._process_dispatched_message(message),
+                    name=f"agent:{self.id}:{message.workflow_id}:{message.id}",
                 )
-
-                result = await self._process_with_retry(message)
-                await self._send_response(message, result)
-                if self.state != AgentState.STOPPED:
-                    self.state = AgentState.RUNNING
-
-            except asyncio.CancelledError:
-                logger.info("agent.cancelled", agent_id=self.id)
-                break
-            except Exception as e:
-                logger.error("agent.error", agent_id=self.id, error=str(e))
-                self.state = AgentState.ERROR
-                await asyncio.sleep(1)  # 短暂等待后恢复
-                self.state = AgentState.RUNNING
-
-        self.state = AgentState.STOPPED
-        logger.info("agent.stopped", agent_id=self.id)
+                self._inflight_tasks.add(task)
+                task.add_done_callback(self._inflight_tasks.discard)
+        except asyncio.CancelledError:
+            logger.info("agent.cancelled", agent_id=self.id)
+        except Exception as exc:
+            logger.exception("agent.dispatcher_error", agent_id=self.id, error=str(exc))
+            self.state = AgentState.ERROR
+        finally:
+            self._running = False
+            tasks = list(self._inflight_tasks)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            self._inflight_tasks.clear()
+            self._active_workflows.clear()
+            self._active_task_count = 0
+            self.state = AgentState.STOPPED
+            logger.info("agent.stopped", agent_id=self.id)
 
     async def stop(self) -> None:
         """停止 Agent"""
+        self._running = False
         self.state = AgentState.STOPPED
+
+    async def _process_dispatched_message(self, message: Message) -> None:
+        """Process one delivery while serializing messages from the same workflow."""
+        workflow_lock = self._workflow_locks.setdefault(
+            message.workflow_id,
+            asyncio.Lock(),
+        )
+        try:
+            async with workflow_lock:
+                await self._mark_task_started(message)
+                try:
+                    result = await self._process_with_retry(message)
+                    await self._send_response(message, result)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.exception(
+                        "agent.task_failed",
+                        agent_id=self.id,
+                        workflow_id=message.workflow_id,
+                        message_id=message.id,
+                        error=str(exc),
+                    )
+                finally:
+                    await self._mark_task_finished(message)
+        finally:
+            await self._dispatch_slots.release()
+
+    async def _mark_task_started(self, message: Message) -> None:
+        async with self._activity_lock:
+            self._active_task_count += 1
+            self._active_workflows.add(message.workflow_id)
+            if self.state != AgentState.STOPPED:
+                self.state = AgentState.WORKING
+        logger.info(
+            "agent.processing",
+            agent_id=self.id,
+            msg_type=message.type.value,
+            sender=message.sender,
+            workflow_id=message.workflow_id,
+            active_tasks=self._active_task_count,
+            max_concurrent=self.config.max_concurrent,
+        )
+
+    async def _mark_task_finished(self, message: Message) -> None:
+        async with self._activity_lock:
+            self._active_task_count = max(0, self._active_task_count - 1)
+            self._active_workflows.discard(message.workflow_id)
+            if self.state != AgentState.STOPPED:
+                self.state = (
+                    AgentState.WORKING
+                    if self._active_task_count > 0
+                    else AgentState.RUNNING
+                )
+
+    def runtime_status(self) -> dict[str, Any]:
+        """Return bounded-concurrency activity without exposing task payloads."""
+        return {
+            "state": self.state.value,
+            "max_concurrent": self.config.max_concurrent,
+            "active_tasks": self._active_task_count,
+            "queued_tasks": max(0, len(self._inflight_tasks) - self._active_task_count),
+            "active_workflows": sorted(self._active_workflows),
+        }
+
+    async def update_max_concurrent(self, value: int) -> None:
+        """Apply a validated concurrency limit without interrupting active tasks."""
+        if not 1 <= value <= 128:
+            raise ValueError("max_concurrent must be between 1 and 128")
+        await self._dispatch_slots.resize(value)
+        self.config.max_concurrent = value
 
     async def _health_probe(self) -> None:
         """Send a minimal command through the configured model endpoint."""

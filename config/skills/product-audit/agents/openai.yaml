@@ -1,0 +1,4 @@
+interface:
+  display_name: "AxonFlow Product Audit"
+  short_description: "Audit AxonFlow and propose one evidence-backed task"
+  default_prompt: "Use $product-audit to inspect AxonFlow and propose a bounded improvement."

@@ -1,0 +1,14 @@
+agent:
+  id: agent-subtitle-generator
+  name: "旁白字幕生成器"
+  role: "根据旁白文本生成与成片时长一致的 UTF-8 SRT 字幕。"
+  agent_type: custom
+  class_path: axonflow.agents.media.SubtitleAgent
+  tools:
+    - subtitle_create
+  retry_limit: 1
+  memory:
+    enabled: false
+  parameters:
+    subtitles:
+      duration_ms: 12000
