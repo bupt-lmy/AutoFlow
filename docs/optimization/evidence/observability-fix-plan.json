@@ -1,0 +1,26 @@
+{
+  "url": "http://127.0.0.1:5173/logs",
+  "timeout_ms": 20000,
+  "actions": [
+    {
+      "type": "expect_text",
+      "text": "Execution Logs"
+    },
+    {
+      "type": "expect_text",
+      "text": "axonflow-self-optimization"
+    },
+    {
+      "type": "expect_text",
+      "text": "run-0fd90478"
+    },
+    {
+      "type": "expect_text",
+      "text": "agent-product-manager"
+    },
+    {
+      "type": "screenshot",
+      "path": "docs/optimization/evidence/execution-logs-fix.png"
+    }
+  ]
+}

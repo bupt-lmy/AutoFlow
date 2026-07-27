@@ -1,0 +1,21 @@
+agent:
+  id: agent-media-composer
+  name: "影视成片合成器"
+  role: "将生成图片、旁白和配乐确定性合成为可交付 MP4。"
+  agent_type: custom
+  class_path: axonflow.agents.media.MediaComposerAgent
+  tools:
+    - media_compose
+  retry_limit: 1
+  memory:
+    enabled: false
+  parameters:
+    composition:
+      duration_seconds: 12
+      width: 1920
+      height: 1080
+      fps: 30
+      music_volume: 0.16
+      narration_volume: 1.0
+      narration_delay_ms: 500
+      timeout: 600

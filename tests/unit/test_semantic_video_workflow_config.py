@@ -32,6 +32,9 @@ def test_semantic_video_edit_workflow_loads() -> None:
     assert agents[4].model.api_key_env == "MINIMAX_API_KEY"
     assert agents[4].model.credential_id is None
     assert agents[4].class_path == "axonflow.agents.video_edit.VideoHighlightScoringAgent"
+    assert agents[4].parameters["max_scenes_per_batch"] == 3
+    assert agents[4].parameters["max_images_per_batch"] == 20
+    assert agents[4].parameters["max_frames_per_scene"] == 6
     assert agents[5].class_path == "axonflow.agents.video_edit.VideoHighlightSelectorAgent"
     assert agents[5].model.api_key_env == "MINIMAX_API_KEY"
     assert agents[5].model.credential_id is None

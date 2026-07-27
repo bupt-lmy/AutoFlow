@@ -49,6 +49,7 @@ class AgentCreateRequest(BaseModel):
     codex_timeout_seconds: int = Field(default=1800, ge=30, le=86400)
     codex_health_check: Literal["exec", "auth", "binary"] = "exec"
     codex_skip_git_repo_check: bool = False
+    max_concurrent: int = Field(default=1, ge=1, le=128)
 
 
 class ModelProfileSelectionRequest(BaseModel):
@@ -58,6 +59,10 @@ class ModelProfileSelectionRequest(BaseModel):
 class CapabilitiesUpdateRequest(BaseModel):
     tools: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
+
+
+class AgentConcurrencyUpdateRequest(BaseModel):
+    max_concurrent: int = Field(ge=1, le=128)
 
 
 _AGENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
@@ -81,7 +86,18 @@ async def list_agents():
     config_dir = get_config_dir()
     agents_dir = config_dir / "agents"
     configs = load_all_agent_configs(agents_dir)
-    return [_agent_to_dict(c) for c in configs]
+    registry = get_engine().agent_registry
+    return [
+        {
+            **_agent_to_dict(config),
+            "runtime": (
+                registry.get(config.id).runtime_status()
+                if registry.get(config.id) is not None
+                else None
+            ),
+        }
+        for config in configs
+    ]
 
 
 @router.get("/manifests")
@@ -90,7 +106,8 @@ async def list_agent_manifests():
     config_dir = get_config_dir()
     configs = load_all_agent_configs(config_dir / "agents")
     manifests = map(AgentManifest.from_agent_config, configs)
-    health_by_agent = get_engine().agent_registry.get_health()
+    registry = get_engine().agent_registry
+    health_by_agent = registry.get_health()
     unknown_health = {
         "state": "unknown",
         "ready": False,
@@ -103,6 +120,11 @@ async def list_agent_manifests():
         {
             **manifest.model_dump(mode="json"),
             "health": health_by_agent.get(manifest.id, unknown_health),
+            "runtime": (
+                registry.get(manifest.id).runtime_status()
+                if registry.get(manifest.id) is not None
+                else None
+            ),
         }
         for manifest in manifests
     ]
@@ -230,6 +252,7 @@ async def create_agent(body: AgentCreateRequest) -> dict:
             else ModelConfig()
         ),
         parameters=parameters,
+        max_concurrent=body.max_concurrent,
     )
     agents_dir.mkdir(parents=True, exist_ok=True)
     target = agents_dir / f"{config.id}.yaml"
@@ -265,8 +288,42 @@ async def get_agent(agent_id: str):
                     result["raw_yaml"] = (agent_path / "config.yaml").read_text(encoding="utf-8")
                 else:
                     result["raw_yaml"] = agent_path.read_text(encoding="utf-8")
+            live_agent = get_engine().agent_registry.get(agent_id)
+            result["runtime"] = live_agent.runtime_status() if live_agent is not None else None
             return result
     raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+
+
+@router.put("/{agent_id}/concurrency")
+async def update_agent_concurrency(
+    agent_id: str,
+    body: AgentConcurrencyUpdateRequest,
+) -> dict:
+    """Persist and immediately apply an Agent's bounded concurrency."""
+    config_dir = get_config_dir()
+    agents_dir = config_dir / "agents"
+    agent_path = _find_agent_path(agents_dir, agent_id)
+    if agent_path is None:
+        raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+    agent = get_engine().agent_registry.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=409, detail="Agent is not active")
+
+    target = agent_path / "config.yaml" if agent_path.is_dir() else agent_path
+    raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    agent_data = raw["agent"] if isinstance(raw.get("agent"), dict) else raw
+    agent_data["max_concurrent"] = body.max_concurrent
+    AgentConfig.model_validate(agent_data)
+    target.write_text(
+        yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    await agent.update_max_concurrent(body.max_concurrent)
+    return {
+        "agent_id": agent_id,
+        "runtime": agent.runtime_status(),
+    }
 
 
 @router.post("/health-check")

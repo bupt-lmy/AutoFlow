@@ -1,213 +1,67 @@
-# AxonFlow 项目目录结构
+# AxonFlow 项目结构
 
-```
-axonflow/
-├── docs/                          # 项目文档
-│   ├── PRD.md                     # 产品需求文档
-│   ├── TECHNICAL_DESIGN.md        # 技术实现方案
-│   └── PROJECT_STRUCTURE.md       # 本文件
-│
-├── src/
-│   └── axonflow/                  # 主包
-│       ├── __init__.py
-│       ├── __main__.py            # python -m axonflow 入口
-│       │
-│       ├── core/                  # 核心模块
-│       │   ├── __init__.py
-│       │   ├── agent.py           # BaseAgent 基类 & AgentRegistry
-│       │   ├── message.py         # Message / MessageType 数据模型
-│       │   ├── workflow.py        # WorkflowOrchestrator 工作流引擎
-│       │   ├── context.py         # WorkflowContext 上下文管理
-│       │   └── scheduler.py       # Cron 调度器
-│       │
-│       ├── messaging/             # 消息系统
-│       │   ├── __init__.py
-│       │   ├── base.py            # MessageBus 抽象接口
-│       │   ├── redis_bus.py       # Redis Streams 实现
-│       │   └── memory_bus.py      # 进程内 asyncio.Queue 实现
-│       │
-│       ├── llm/                   # LLM 集成
-│       │   ├── __init__.py
-│       │   ├── gateway.py         # LLMGateway 统一调用入口
-│       │   ├── token_tracker.py   # Token 用量追踪
-│       │   └── prompt_builder.py  # Prompt 构建器
-│       │
-│       ├── tools/                 # 工具系统
-│       │   ├── __init__.py
-│       │   ├── base.py            # Tool 基类 & ToolRegistry
-│       │   ├── shell_exec.py      # Shell 命令执行
-│       │   ├── file_ops.py        # 文件读写操作
-│       │   ├── git_ops.py         # Git 操作
-│       │   ├── http_request.py    # HTTP 请求
-│       │   └── docker_ops.py      # Docker 操作
-│       │
-│       ├── agents/                # 预置智能体实现
-│       │   ├── __init__.py
-│       │   ├── coder.py           # 编码专员
-│       │   ├── tester.py          # 测试专员
-│       │   └── publisher.py       # 发布专员
-│       │
-│       ├── config/                # 配置管理
-│       │   ├── __init__.py
-│       │   ├── models.py          # Pydantic 配置模型
-│       │   ├── loader.py          # YAML 配置加载器
-│       │   └── defaults.py        # 默认配置值
-│       │
-│       ├── observability/         # 可观测性
-│       │   ├── __init__.py
-│       │   ├── logger.py          # structlog 配置
-│       │   ├── metrics.py         # 指标采集
-│       │   ├── tracer.py          # 执行轨迹追踪
-│       │   └── webhook.py         # Webhook 通知
-│       │
-│       ├── security/              # 安全模块
-│       │   ├── __init__.py
-│       │   ├── sandbox.py         # 沙箱执行器
-│       │   └── secrets.py         # 密钥管理
-│       │
-│       ├── cli/                   # CLI 命令
-│       │   ├── __init__.py
-│       │   ├── app.py             # Typer CLI 主应用
-│       │   ├── commands/
-│       │   │   ├── __init__.py
-│       │   │   ├── start.py       # axonflow start
-│       │   │   ├── run.py         # axonflow run
-│       │   │   ├── status.py      # axonflow status
-│       │   │   ├── stop.py        # axonflow stop
-│       │   │   ├── logs.py        # axonflow logs
-│       │   │   ├── history.py     # axonflow history
-│       │   │   └── agent.py       # axonflow agent *
-│       │   └── utils.py           # CLI 工具函数
-│       │
-│       └── engine.py              # AxonFlow 引擎主入口
-│
-├── config/                        # 用户配置目录
-│   ├── axonflow.yaml              # 全局配置
-│   ├── agents/                    # 智能体配置
-│   │   ├── coder.yaml
-│   │   ├── tester.yaml
-│   │   └── publisher.yaml
-│   └── workflows/                 # 工作流配置
-│       └── dev-pipeline.yaml
-│
-├── templates/                     # 配置模板
-│   ├── agents/
-│   │   ├── coder.yaml.template
-│   │   ├── tester.yaml.template
-│   │   └── publisher.yaml.template
-│   └── workflows/
-│       └── dev-pipeline.yaml.template
-│
-├── plugins/                       # 第三方插件目录
-│   └── README.md
-│
-├── tests/                         # 测试
-│   ├── __init__.py
-│   ├── conftest.py                # pytest fixtures
+> 更新：2026-07-16。以下为当前仓库的主要目录；运行时缓存、构建产物和历史设计稿不逐项展开。
+
+```text
+AxonFlow/
+├── config/                         # 运行配置
+│   ├── axonflow.yaml                # 全局模型、Redis、日志、安全与 Webhook
+│   ├── agents/                      # Agent YAML 与目录式 Persona
+│   ├── skills/                      # 托管 Skill（SKILL.md）
+│   └── workflows/                   # YAML 工作流运行定义
+├── docs/
+│   ├── PRD.md                       # 产品范围与近期优先项
+│   ├── AGENT_INTEGRATION.md         # 复杂 Agent、发现协议与故障替换
+│   ├── TECHNICAL_DESIGN.md          # 当前技术架构
+│   ├── WORKFLOW_PATTERNS.md         # 编排模式、局部 ReAct 与质量闭环
+│   ├── PROJECT_STRUCTURE.md         # 本文件
+│   ├── specs/                       # 历史规格
+│   └── superpowers/                 # 历史计划与规格
+├── frontend/                        # React + TypeScript 管理台
+│   ├── src/api/                     # REST 与 WebSocket 客户端
+│   ├── src/components/              # 工作流画布、YAML、实时日志组件
+│   ├── src/layouts/                 # 主布局
+│   ├── src/pages/                   # Dashboard、工作流、Agent、Skill、日志等
+│   └── dist/                        # 前端构建产物（存在时由 API 挂载）
+├── src/axonflow/
+│   ├── agents/                       # HTTP Remote Agent 与动态发现包装器
+│   ├── api/                         # FastAPI 应用、路由、WebSocket
+│   ├── cli/                         # Typer CLI
+│   ├── config/                      # Pydantic 模型与 YAML/Skill 加载
+│   ├── core/                        # Agent、上下文、Flat/Supervisor 编排、调度器
+│   ├── discovery/                   # 本地 ADP-lite 能力发现与排序
+│   ├── llm/                         # LiteLLM 网关、Prompt、Token/Trace
+│   ├── memory/                      # 内存存储接口与实现
+│   ├── messaging/                   # Redis 与内存消息总线
+│   ├── observability/               # 结构化日志、执行日志、LangSmith
+│   ├── platform/                    # SQLite 平台数据、可视化工作流模型、凭据
+│   ├── security/                    # 沙箱与密钥相关能力
+│   ├── tools/                       # 内置工具与注册表
+│   └── engine.py                    # 组装模块、加载配置、运行工作流
+├── tests/
 │   ├── unit/
-│   │   ├── __init__.py
-│   │   ├── test_agent.py
-│   │   ├── test_message.py
-│   │   ├── test_workflow.py
-│   │   ├── test_tools.py
-│   │   └── test_llm_gateway.py
 │   ├── integration/
-│   │   ├── __init__.py
-│   │   ├── test_message_bus.py
-│   │   └── test_workflow_execution.py
 │   └── e2e/
-│       ├── __init__.py
-│       └── test_dev_pipeline.py
-│
-├── workspace/                     # Agent 工作目录（运行时生成）
-│   └── .gitkeep
-│
-├── logs/                          # 日志输出目录
-│   └── .gitkeep
-│
-├── docker/
-│   ├── Dockerfile
-│   └── docker-compose.yml
-│
-├── pyproject.toml                 # 项目元数据 & 依赖
-├── LICENSE                        # Apache 2.0
-├── README.md                      # 项目说明
-├── Makefile                       # 常用命令快捷方式
-└── .gitignore
+├── docker/docker-compose.yml        # Redis 等本地依赖编排
+├── workspace/                       # Agent 工作目录与平台 SQLite 数据
+├── logs/                            # 运行日志目录
+├── pyproject.toml                   # Python 包与工具配置
+└── README.md                        # 项目入口
 ```
 
-## 模块依赖关系
+## 模块关系
 
-```
-cli/
- └── engine.py
-      ├── core/
-      │    ├── agent.py ─────── llm/gateway.py
-      │    │                     tools/base.py
-      │    ├── workflow.py ──── messaging/base.py
-      │    ├── context.py
-      │    └── scheduler.py ─── workflow.py
-      │
-      ├── messaging/
-      │    ├── redis_bus.py
-      │    └── memory_bus.py
-      │
-      ├── config/
-      │    ├── models.py
-      │    └── loader.py
-      │
-      ├── observability/
-      │    ├── logger.py
-      │    ├── metrics.py
-      │    └── webhook.py
-      │
-      └── security/
-           ├── sandbox.py
-           └── secrets.py
+```text
+CLI / Web UI
+    │
+FastAPI routes ─────────────── PlatformStore (SQLite)
+    │                                      │
+AxonFlowEngine ── Config loader ───────────┘
+    ├── AgentRegistry ── Base / Remote / DiscoveredAgent ── LLMGateway / ToolRegistry
+    ├── Orchestrator factory ── FlatOrchestrator / SupervisorOrchestrator
+    ├── MessageBus ── RedisMessageBus / InMemoryMessageBus
+    ├── Scheduler
+    └── ExecutionLogger / LangSmith
 ```
 
-## 关键依赖包
-
-```toml
-[project]
-name = "axonflow"
-version = "0.1.0"
-requires-python = ">=3.11"
-
-[project.dependencies]
-# 核心
-asyncio-extras = ">=1.3"
-pydantic = ">=2.0"
-pyyaml = ">=6.0"
-
-# LLM
-litellm = ">=1.0"
-
-# 消息队列
-redis = {version = ">=5.0", extras = ["hiredis"]}
-
-# CLI
-typer = ">=0.9"
-rich = ">=13.0"
-
-# 日志
-structlog = ">=24.0"
-
-# HTTP
-aiohttp = ">=3.9"
-
-# 调度
-croniter = ">=2.0"
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "pytest-cov>=5.0",
-    "ruff>=0.4",
-    "mypy>=1.10",
-]
-
-[project.scripts]
-axonflow = "axonflow.cli.app:main"
-```
+工作流 YAML 是 CLI 与引擎的运行来源。平台层在保存画布时会同步写入该 YAML，并将画布位置、运行记录和事件保存到 `workspace/axonflow.db`。

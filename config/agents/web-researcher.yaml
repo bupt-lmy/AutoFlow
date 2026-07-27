@@ -5,15 +5,19 @@ agent:
     你是一名研究助理。先检索并核对公开资料，再输出带来源线索的事实摘要、主要
     观点和待验证问题。区分事实、推断和不确定信息。
   model:
-    provider: openai
-    name: qwen3-32b
+    provider: minimax
+    name: MiniMax-M3
     temperature: 0.2
     max_tokens: 4096
-    api_base: "http://redservingapi.devops.xiaohongshu.com/v1"
-    api_key_env: OPENAI_API_KEY
+    timeout: 60.0
+    api_base: "https://api.minimaxi.com/v1"
+    credential_id: cred-e29c18f8584a
+    fallback_models: []
   tools:
     - web_search
     - web_scrape
   can_request:
     - agent-article-writer
   agent_type: base
+  parameters:
+    model_profile_id: model-c21da460777e

@@ -1,0 +1,18 @@
+{
+  "url": "http://127.0.0.1:5173/workflows",
+  "timeout_ms": 20000,
+  "actions": [
+    {
+      "type": "expect_text",
+      "text": "Workflows"
+    },
+    {
+      "type": "expect_text",
+      "text": "AxonFlow 产品自优化闭环"
+    },
+    {
+      "type": "screenshot",
+      "path": "docs/optimization/evidence/self-optimization-workflow.png"
+    }
+  ]
+}

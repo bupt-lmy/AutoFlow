@@ -1,0 +1,20 @@
+agent:
+  id: agent-minimax-narration-generator
+  name: "MiniMax 中文旁白生成器"
+  role: "把影视旁白文本合成为可供时间线混音的中文语音素材。"
+  agent_type: custom
+  class_path: axonflow.agents.minimax_media.MiniMaxNarrationAgent
+  tools:
+    - minimax_speech_generate
+  retry_limit: 1
+  memory:
+    enabled: false
+  parameters:
+    minimax:
+      model: speech-2.8-hd
+      credential_id: cred-e29c18f8584a
+      voice_id: male-qn-jingying
+      speed: 1.0
+      volume: 1.0
+      pitch: 0
+      timeout: 180

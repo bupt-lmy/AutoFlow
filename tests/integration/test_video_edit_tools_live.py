@@ -60,6 +60,58 @@ def _source_video(path: Path) -> None:
     )
 
 
+def _source_with_short_shot(path: Path) -> None:
+    subprocess.run(
+        [
+            str(FFMPEG_FULL),
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=320x240:r=25:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:r=25:d=0.2",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=320x240:r=25:d=1",
+            "-filter_complex",
+            "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+            "-map",
+            "[v]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+    )
+
+
+async def test_scene_detection_keeps_short_shots_and_never_uniformly_drops(tmp_path) -> None:
+    source = tmp_path / "short-shot.mp4"
+    _source_with_short_shot(source)
+
+    result = await VideoSceneDetectTool(tmp_path / "short-keyframes").execute(
+        str(source),
+        threshold=8,
+        min_scene_ms=500,
+        max_scenes=2,
+    )
+
+    assert result.success is True, result.error
+    detected = json.loads(result.output or "{}")
+    assert len(detected["scenes"]) >= 3
+    assert any(scene["short_shot"] for scene in detected["scenes"])
+    assert detected["scene_detection"]["capacity_warning"] is True
+    assert detected["scene_detection"]["discarded_scene_count"] == 0
+
+
 async def test_ingest_scene_detect_and_highlight_render_preserve_motion(tmp_path) -> None:
     source = tmp_path / "source.mp4"
     _source_video(source)

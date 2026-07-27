@@ -40,7 +40,7 @@ export default function LiveEventLog({ events }: Props) {
       overflowY: 'auto',
     }}>
       {events.length === 0 && (
-        <div style={{ color: '#666' }}>Waiting for events...</div>
+        <div style={{ color: '#666' }}>等待执行事件...</div>
       )}
       {events.map((evt, i) => (
         <div key={i} style={{ marginBottom: 4 }}>

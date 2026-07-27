@@ -1,0 +1,4 @@
+interface:
+  display_name: "Browser Acceptance"
+  short_description: "Verify AxonFlow changes in a real browser and record results"
+  default_prompt: "Use $browser-acceptance to test the AxonFlow UI and record pass or fail evidence."

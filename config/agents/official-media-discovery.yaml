@@ -1,0 +1,22 @@
+agent:
+  id: agent-official-media-discovery
+  name: "官方影视资源发现器"
+  role: "根据标准片名搜索官方公开视频和官网证据，只保留可信制片方、发行方或版权方频道。"
+  agent_type: custom
+  class_path: axonflow.agents.movie_discovery.OfficialMediaDiscoveryAgent
+  tools: [official_video_search, web_search]
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    max_results_per_query: 8
+    timeout: 180
+    trusted_channels:
+      - Marvel Entertainment
+      - Marvel Studios
+      - Walt Disney Studios
+      - Disney
+      - Pixar
+      - Warner Bros. Pictures
+      - Universal Pictures
+      - Sony Pictures Entertainment
+      - Paramount Pictures

@@ -4,13 +4,17 @@ agent:
   role: "根据逐时刻运动与音频曲线定位动作峰值，加入自然预留和收尾，并将边界对齐到输出帧。"
   agent_type: custom
   class_path: axonflow.agents.video_edit.VideoIntervalRefinerAgent
-  tools: []
+  tools: [video_activity_scan]
   retry_limit: 1
   memory: {enabled: false}
   parameters:
     refinement:
       min_clip_ms: 800
       max_clip_ms: 8000
+      preferred_clip_ms: 4000
+      max_peaks_per_scene: 8
+      max_scene_share: 0.6
       pre_roll_ms: 350
       post_roll_ms: 550
+      fine_scan_fps: 12
       fps: 30

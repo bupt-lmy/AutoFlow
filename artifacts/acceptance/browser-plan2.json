@@ -1,0 +1,15 @@
+{
+  "url": "http://127.0.0.1:5173/workflows",
+  "timeout_ms": 20000,
+  "actions": [
+    {"type": "wait_for_text", "text": "Workflows"},
+    {"type": "screenshot", "path": "artifacts/acceptance/workflows-table.png"},
+    {"type": "expect_text", "text": "AxonFlow 产品自优化闭环"},
+    {"type": "expect_text", "text": "Manual"},
+    {"type": "expect_text", "text": "Flat"},
+    {"type": "expect_text", "text": "Supervisor 模式开发流水线"},
+    {"type": "expect_text", "text": "Supervisor"},
+    {"type": "expect_text", "text": "Open"},
+    {"type": "expect_text", "text": "of"}
+  ]
+}

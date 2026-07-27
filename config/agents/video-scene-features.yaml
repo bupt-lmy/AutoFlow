@@ -10,5 +10,6 @@ agent:
   parameters:
     features:
       samples_per_scene: 5
+      max_samples_per_scene: 12
       analysis_fps: 4
       timeout: 3600

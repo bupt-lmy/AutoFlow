@@ -1,0 +1,11 @@
+agent:
+  id: agent-media-inspector
+  name: "媒体探测器"
+  role: "确定性探测输入媒体，不进行内容创作。"
+  agent_type: custom
+  class_path: axonflow.agents.media.MediaInspectorAgent
+  tools:
+    - media_probe
+  retry_limit: 1
+  memory:
+    enabled: false

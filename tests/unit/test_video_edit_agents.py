@@ -361,6 +361,26 @@ def test_scoring_batches_never_exceed_minimax_image_limit() -> None:
     )
 
 
+def test_six_frame_semantic_batches_stay_below_twenty_images() -> None:
+    scenes = [
+        {"id": f"scene-{index:03d}", "sample_frames": [{} for _ in range(6)]}
+        for index in range(10)
+    ]
+
+    batches = VideoHighlightScoringAgent._scene_batches(
+        scenes,
+        max_scenes=3,
+        max_images=20,
+        max_frames_per_scene=6,
+    )
+
+    assert [len(batch) for batch in batches] == [3, 3, 3, 1]
+    assert all(
+        sum(min(len(scene["sample_frames"]), 6) for scene in batch) <= 20
+        for batch in batches
+    )
+
+
 def test_scoring_prefilter_limits_long_video_and_preserves_time_coverage() -> None:
     scenes = []
     for index in range(100):
@@ -387,6 +407,36 @@ def test_scoring_prefilter_limits_long_video_and_preserves_time_coverage() -> No
     assert "scene-000" in selected_ids
     assert "scene-050" in selected_ids
     assert "scene-099" in selected_ids
+
+
+def test_selector_candidate_pool_is_not_consumed_by_one_long_take() -> None:
+    scenes = [
+        {
+            "id": f"scene-{index}",
+            "start_ms": index * 100_000,
+            "end_ms": (index + 1) * 100_000,
+            "highlight_score": 1 - index * 0.1,
+            "black_ratio": 0,
+        }
+        for index in range(5)
+    ]
+    message = Message(
+        type=MessageType.TASK_REQUEST,
+        sender="scorer",
+        receiver="selector",
+        payload={"source_path": "/source.mp4"},
+    )
+
+    result = VideoHighlightSelectorAgent._select_scored_scenes(
+        message,
+        scenes,
+        "精彩动作",
+        30,
+    )
+
+    assert result["status"] == "success"
+    assert len(result["candidate_clips"]) == 4
+    assert len({clip["scene_id"] for clip in result["candidate_clips"]}) == 4
 
 
 async def test_interval_refiner_cuts_around_internal_activity_peak() -> None:
@@ -445,11 +495,148 @@ async def test_interval_refiner_cuts_around_internal_activity_peak() -> None:
 
     assert result["status"] == "success"
     clip = result["selected_clips"][0]
-    assert 3500 <= clip["start_ms"] <= 4500
-    assert 4500 <= clip["end_ms"] <= 5500
+    assert 2800 <= clip["start_ms"] <= 4000
+    assert 4800 <= clip["end_ms"] <= 6000
     assert clip["start_ms"] <= clip["peak_ms"] <= clip["end_ms"]
     assert result["refinement_report"]["actual_duration_ms"] == 2000
     assert result["refinement_report"]["duration_delta_ms"] == 0
+
+
+async def test_interval_refiner_uses_multiple_peaks_from_one_long_take() -> None:
+    agent = VideoIntervalRefinerAgent(
+        AgentConfig(
+            id="refiner",
+            name="Refiner",
+            parameters={
+                "refinement": {
+                    "min_clip_ms": 800,
+                    "preferred_clip_ms": 4000,
+                    "max_clip_ms": 8000,
+                    "max_peaks_per_scene": 8,
+                    "fps": 25,
+                }
+            },
+            memory={"enabled": False},
+        ),
+        Mock(),
+        Mock(),
+        ToolRegistry(),
+    )
+    rows = [
+        {
+            "timestamp_ms": timestamp,
+            "event_activity": (
+                0.95 if timestamp in {5000, 12_000, 19_000, 26_000} else 0.02
+            ),
+        }
+        for timestamp in range(0, 30_000, 200)
+    ]
+
+    result = await agent.handle_message(
+        Message(
+            type=MessageType.TASK_REQUEST,
+            sender="selector",
+            receiver=agent.id,
+            payload={
+                "source_path": "/source.mp4",
+                "target_duration_seconds": 12,
+                "candidate_clips": [
+                    {"scene_id": "scene-long", "start_ms": 0, "end_ms": 30_000}
+                ],
+                "scored_scenes": [
+                    {
+                        "id": "scene-long",
+                        "start_ms": 0,
+                        "end_ms": 30_000,
+                        "highlight_score": 0.9,
+                        "feature_samples": rows,
+                    }
+                ],
+            },
+        )
+    )
+
+    assert result["status"] == "success"
+    assert len(result["selected_clips"]) == 3
+    assert result["refinement_report"]["actual_duration_ms"] == 12_000
+    assert result["refinement_report"]["duration_delta_ms"] == 0
+    assert all(
+        left["end_ms"] <= right["start_ms"]
+        for left, right in zip(
+            result["selected_clips"],
+            result["selected_clips"][1:],
+            strict=False,
+        )
+    )
+
+
+async def test_interval_refiner_reserves_duration_for_multiple_scenes() -> None:
+    agent = VideoIntervalRefinerAgent(
+        AgentConfig(
+            id="refiner",
+            name="Refiner",
+            parameters={
+                "refinement": {
+                    "min_clip_ms": 800,
+                    "preferred_clip_ms": 4000,
+                    "max_clip_ms": 8000,
+                    "max_peaks_per_scene": 8,
+                    "max_scene_share": 0.6,
+                    "fps": 25,
+                }
+            },
+            memory={"enabled": False},
+        ),
+        Mock(),
+        Mock(),
+        ToolRegistry(),
+    )
+
+    def scene(scene_id: str, start: int, score: float) -> dict:
+        return {
+            "id": scene_id,
+            "start_ms": start,
+            "end_ms": start + 30_000,
+            "highlight_score": score,
+            "feature_samples": [
+                {
+                    "timestamp_ms": start + timestamp,
+                    "event_activity": (
+                        0.95 if timestamp in {5000, 12_000, 19_000, 26_000} else 0.02
+                    ),
+                }
+                for timestamp in range(0, 30_000, 200)
+            ],
+        }
+
+    result = await agent.handle_message(
+        Message(
+            type=MessageType.TASK_REQUEST,
+            sender="selector",
+            receiver=agent.id,
+            payload={
+                "source_path": "/source.mp4",
+                "target_duration_seconds": 12,
+                "candidate_clips": [
+                    {"scene_id": "scene-a", "start_ms": 0, "end_ms": 30_000},
+                    {"scene_id": "scene-b", "start_ms": 30_000, "end_ms": 60_000},
+                ],
+                "scored_scenes": [
+                    scene("scene-a", 0, 0.9),
+                    scene("scene-b", 30_000, 0.8),
+                ],
+            },
+        )
+    )
+
+    durations: dict[str, int] = {}
+    for clip in result["selected_clips"]:
+        durations[clip["scene_id"]] = durations.get(clip["scene_id"], 0) + (
+            clip["end_ms"] - clip["start_ms"]
+        )
+    assert result["refinement_report"]["actual_duration_ms"] == 12_000
+    assert set(durations) == {"scene-a", "scene-b"}
+    assert max(durations.values()) <= 7200
 
 
 async def test_interval_refiner_health_is_local_and_does_not_call_llm() -> None:

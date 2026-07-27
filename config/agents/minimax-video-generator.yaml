@@ -1,0 +1,18 @@
+agent:
+  id: agent-minimax-video-generator
+  name: "MiniMax Hailuo 动态视频生成器"
+  role: "调用 MiniMax Hailuo 异步文生视频接口，轮询任务并下载真实动态 MP4。"
+  agent_type: custom
+  class_path: axonflow.agents.minimax_media.MiniMaxVideoAgent
+  tools: [minimax_video_generate]
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    minimax:
+      model: MiniMax-Hailuo-2.3
+      credential_id: cred-e29c18f8584a
+      api_key_env: MINIMAX_API_KEY
+      duration: 6
+      resolution: 768P
+      timeout: 1200
+      poll_interval: 5

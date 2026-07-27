@@ -1,0 +1,65 @@
+workflow:
+  id: text-to-video-generation
+  name: "文本描述 AI 视频生成（分镜动态 / Hailuo）"
+  trigger:
+    type: manual
+  agents:
+    - agent-generation-resource-search
+    - agent-text-video-prompt-planner
+    - agent-minimax-storyboard-generator
+    - agent-storyboard-motion-renderer
+    - agent-minimax-video-generator
+    - agent-generated-video-disclosure
+    - agent-media-quality
+    - agent-media-asset-register
+  flow:
+    mode: flat
+    entry: agent-generation-resource-search
+    max_iterations: 10
+    timeout: 3600
+    routes:
+      agent-generation-resource-search:
+        - target: agent-text-video-prompt-planner
+          condition: {field: status, operator: eq, value: success}
+      agent-text-video-prompt-planner:
+        - target: agent-minimax-storyboard-generator
+          condition: {field: generation_backend, operator: eq, value: storyboard}
+          payload_mapping:
+            include: [project_title, shot_prompts, shot_duration_seconds, duration, requires_disclosure]
+        - target: agent-minimax-video-generator
+          condition: {field: generation_backend, operator: eq, value: hailuo}
+          payload_mapping:
+            include: [project_title, video_prompt, duration, resolution, requires_disclosure]
+      agent-minimax-storyboard-generator:
+        - target: agent-storyboard-motion-renderer
+          condition: {field: status, operator: eq, value: success}
+      agent-storyboard-motion-renderer:
+        - target: agent-generated-video-disclosure
+          condition: {field: status, operator: eq, value: success}
+      agent-minimax-video-generator:
+        - target: agent-generated-video-disclosure
+          condition: {field: status, operator: eq, value: success}
+      agent-generated-video-disclosure:
+        - target: agent-media-quality
+          condition: {field: status, operator: eq, value: success}
+      agent-media-quality:
+        - target: agent-media-asset-register
+          condition: {field: status, operator: eq, value: success}
+    terminate_on:
+      - {agent: agent-media-asset-register, status: success}
+      - {agent: agent-generation-resource-search, status: error}
+      - {agent: agent-text-video-prompt-planner, status: error}
+      - {agent: agent-minimax-storyboard-generator, status: error}
+      - {agent: agent-storyboard-motion-renderer, status: error}
+      - {agent: agent-minimax-video-generator, status: error}
+      - {agent: agent-generated-video-disclosure, status: error}
+      - {agent: agent-media-quality, status: error}
+      - {agent: agent-media-asset-register, status: error}
+  context:
+    input_contract:
+      description: "语言转写后的文本或直接文本描述"
+      duration: "6 或 10 秒，默认 6"
+      resolution: "768P 或 1080P；10 秒仅支持 768P"
+      generation_backend: "默认 storyboard（无需视频额度）；可显式指定 hailuo"
+      collect_resources: true
+    output: "带永久 AI GENERATED - FICTIONAL 标识的 H.264/AAC 视频"

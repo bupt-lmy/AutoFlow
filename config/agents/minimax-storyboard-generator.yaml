@@ -1,0 +1,17 @@
+agent:
+  id: agent-minimax-storyboard-generator
+  name: "MiniMax 连续动作分镜生成器"
+  role: "使用当前 Token Plan 已包含的 image-01 权限，逐镜生成一组 16:9 连续动作关键帧。"
+  agent_type: custom
+  class_path: axonflow.agents.minimax_media.MiniMaxStoryboardAgent
+  tools: [minimax_image_generate]
+  retry_limit: 1
+  memory: {enabled: false}
+  parameters:
+    minimax:
+      model: image-01
+      credential_id: cred-e29c18f8584a
+      api_key_env: MINIMAX_API_KEY
+      aspect_ratio: "16:9"
+      transition_seconds: 0.4
+      timeout: 180

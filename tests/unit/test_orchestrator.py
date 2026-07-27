@@ -159,9 +159,7 @@ class TestFlatOrchestratorRouting:
                     "left": [Route(target="joined")],
                     "right": [Route(target="joined")],
                 },
-                join={
-                    "joined": JoinConfig(wait_for=["left", "right"], strategy="all")
-                },
+                join={"joined": JoinConfig(wait_for=["left", "right"], strategy="all")},
             ),
         )
 
@@ -690,6 +688,261 @@ class TestSupervisorReview:
             )
         ]
 
+    @pytest.mark.asyncio
+    async def test_supervisor_rejects_unsupported_completion(self):
+        from axonflow.core.supervisor import SupervisorOrchestrator
+
+        bus = InMemoryMessageBus()
+        config = WorkflowConfig(
+            id="strict-supervision",
+            name="Strict supervision",
+            agents=["worker", "supervisor"],
+            flow=FlowConfig(
+                mode="supervisor",
+                entry="worker",
+                terminate_on=[{"agent": "worker", "status": "success"}],
+                supervisor=SupervisorConfig(
+                    agent_id="supervisor",
+                    acceptance_criteria=["测试通过"],
+                    require_terminal_candidate=True,
+                    require_evidence=True,
+                ),
+            ),
+        )
+
+        class Gateway:
+            async def chat(self, messages, **_kwargs):
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "verdict": "accept",
+                            "done": True,
+                            "reason": "Agent said success",
+                            "acceptance": {
+                                "passed": True,
+                                "criteria": [
+                                    {
+                                        "criterion": "测试通过",
+                                        "passed": True,
+                                        "evidence": [],
+                                    }
+                                ],
+                                "evidence": [],
+                                "unresolved_issues": [],
+                            },
+                            "next": [],
+                        }
+                    )
+                )
+
+        orchestrator = SupervisorOrchestrator(
+            config,
+            _make_registry(["worker", "supervisor"], bus),
+            bus,
+            llm_gateway=Gateway(),  # type: ignore[arg-type]
+        )
+        ctx = WorkflowContext()
+        ctx.update_state("supervision", orchestrator._new_supervision_state())
+
+        targets = await orchestrator._decide_next(
+            step_results=[
+                {
+                    "agent": "worker",
+                    "status": "success",
+                    "payload": {"status": "success", "content": "Done"},
+                }
+            ],
+            completed_steps=[],
+            initial_input="Build",
+            ctx=ctx,
+            terminal_reached=True,
+        )
+
+        assert targets == []
+        assert orchestrator._completion_status == "verification_failed"
+        report = orchestrator._build_output(ctx, [], content="failed", status="error")[
+            "supervision_report"
+        ]
+        assert report["completion_violations"] == ["Agent 未返回配置要求的结构化证据"]
+
+    def test_supervisor_blocks_repeated_identical_decisions(self):
+        from axonflow.core.supervisor import SupervisorOrchestrator
+
+        bus = InMemoryMessageBus()
+        config = WorkflowConfig(
+            id="bounded-supervision",
+            name="Bounded supervision",
+            agents=["worker", "supervisor"],
+            flow=FlowConfig(
+                mode="supervisor",
+                entry="worker",
+                supervisor=SupervisorConfig(
+                    agent_id="supervisor",
+                    max_repeated_decisions=2,
+                ),
+            ),
+        )
+        orchestrator = SupervisorOrchestrator(
+            config,
+            _make_registry(["worker", "supervisor"], bus),
+            bus,
+        )
+        ctx = WorkflowContext()
+        target = [("worker", {"task": "retry"})]
+
+        assert orchestrator._guard_targets(target, ctx) == target
+        assert orchestrator._guard_targets(target, ctx) == target
+        assert orchestrator._guard_targets(target, ctx) == []
+        assert orchestrator._completion_status == "blocked"
+        assert "防死循环" in orchestrator._supervision_state(ctx)["blocked_reason"]
+
+    @pytest.mark.asyncio
+    async def test_supervisor_repairs_then_reverifies_before_completion(self):
+        from axonflow.core.supervisor import SupervisorOrchestrator
+
+        responses = {
+            "worker": {"status": "success", "content": "Implemented, not tested"},
+            "fixer": {
+                "status": "success",
+                "content": "Fixed the defect",
+                "artifacts": [{"path": "app.py"}],
+            },
+            "verifier": {
+                "status": "success",
+                "content": "All tests passed",
+                "test_results": {"passed": 12, "failed": 0},
+            },
+        }
+
+        class AutoResponseBus(InMemoryMessageBus):
+            async def send(self, message):
+                await super().send(message)
+                if message.type != MessageType.TASK_REQUEST:
+                    return
+                await super().send(
+                    Message(
+                        sender=message.receiver,
+                        receiver="__orchestrator__",
+                        type=MessageType.TASK_RESPONSE,
+                        payload=responses[message.receiver],
+                        workflow_id=message.workflow_id,
+                        step_id=message.step_id,
+                    )
+                )
+
+        class Gateway:
+            def __init__(self):
+                self.review = 0
+
+            async def chat(self, messages, **_kwargs):
+                system = str(messages[0]["content"])
+                if "汇总以下工作流" in system:
+                    return SimpleNamespace(content="修复完成且复验通过")
+                self.review += 1
+                decisions = [
+                    {
+                        "verdict": "rework",
+                        "done": False,
+                        "reason": "缺少测试证据",
+                        "acceptance": {
+                            "passed": False,
+                            "criteria": [],
+                            "evidence": [],
+                            "unresolved_issues": ["尚未测试"],
+                        },
+                        "next": [
+                            {
+                                "agent_id": "fixer",
+                                "payload": {"task": "修复实现问题"},
+                            }
+                        ],
+                    },
+                    {
+                        "verdict": "continue",
+                        "done": False,
+                        "reason": "修复后必须复验",
+                        "acceptance": {
+                            "passed": False,
+                            "criteria": [],
+                            "evidence": ["artifacts"],
+                            "unresolved_issues": ["等待复验"],
+                        },
+                        "next": [
+                            {
+                                "agent_id": "verifier",
+                                "payload": {"task": "运行回归测试"},
+                            }
+                        ],
+                    },
+                    {
+                        "verdict": "accept",
+                        "done": True,
+                        "reason": "终止节点和测试证据均满足",
+                        "acceptance": {
+                            "passed": True,
+                            "criteria": [
+                                {
+                                    "criterion": "测试全部通过",
+                                    "passed": True,
+                                    "evidence": ["test_results.failed=0"],
+                                }
+                            ],
+                            "evidence": ["test_results"],
+                            "unresolved_issues": [],
+                        },
+                        "next": [],
+                    },
+                ]
+                return SimpleNamespace(content=json.dumps(decisions[self.review - 1]))
+
+        bus = AutoResponseBus()
+        config = WorkflowConfig(
+            id="repair-loop",
+            name="Repair loop",
+            agents=["worker", "fixer", "verifier", "supervisor"],
+            flow=FlowConfig(
+                mode="supervisor",
+                entry="worker",
+                max_iterations=6,
+                terminate_on=[{"agent": "verifier", "status": "success"}],
+                supervisor=SupervisorConfig(
+                    agent_id="supervisor",
+                    planning_enabled=False,
+                    acceptance_criteria=["测试全部通过"],
+                    require_terminal_candidate=True,
+                    require_evidence=True,
+                ),
+            ),
+        )
+        orchestrator = SupervisorOrchestrator(
+            config,
+            _make_registry(["worker", "fixer", "verifier", "supervisor"], bus),
+            bus,
+            llm_gateway=Gateway(),  # type: ignore[arg-type]
+        )
+
+        result = await orchestrator.execute("实现并验证功能")
+
+        assert result.status == "completed"
+        assert result.iterations == 3
+        assert result.output["test_results"] == {"passed": 12, "failed": 0}
+        report = result.output["supervision_report"]
+        assert report["review_cycles"] == 3
+        assert report["attempts_by_agent"] == {
+            "worker": 1,
+            "fixer": 1,
+            "verifier": 1,
+        }
+        assert [item["verdict"] for item in report["decision_history"]] == [
+            "rework",
+            "continue",
+            "accept",
+        ]
+        assert {item["field"] for item in report["evidence"]} == {
+            "artifacts",
+            "test_results",
+        }
+
     def test_register_custom_orchestrator(self):
         class CustomOrch(FlatOrchestrator):
             pass
@@ -730,6 +983,9 @@ class TestConfigModels:
         cfg = SupervisorConfig(agent_id="sup")
         assert cfg.planning_enabled is True
         assert cfg.intervention_on_failure is True
+        assert cfg.max_attempts_per_agent == 4
+        assert cfg.max_repeated_decisions == 2
+        assert "evidence" in cfg.evidence_fields
 
     def test_flow_config_mode_default(self):
         cfg = FlowConfig(entry="a")

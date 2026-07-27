@@ -14,13 +14,13 @@ import {
 const { Sider, Content } = Layout;
 
 const menuItems = [
-  { key: '/', icon: <DashboardOutlined />, label: 'Dashboard' },
-  { key: '/workflows', icon: <ApartmentOutlined />, label: 'Workflows' },
-  { key: '/agents', icon: <RobotOutlined />, label: 'Agents' },
-  { key: '/skills', icon: <ReadOutlined />, label: 'Skills' },
-  { key: '/logs', icon: <FileTextOutlined />, label: 'Logs' },
-  { key: '/observability', icon: <LineChartOutlined />, label: 'LLM Traces' },
-  { key: '/settings', icon: <SettingOutlined />, label: 'Settings' },
+  { key: '/', icon: <DashboardOutlined />, label: '概览' },
+  { key: '/workflows', icon: <ApartmentOutlined />, label: '工作流' },
+  { key: '/agents', icon: <RobotOutlined />, label: 'Agent' },
+  { key: '/skills', icon: <ReadOutlined />, label: '技能' },
+  { key: '/logs', icon: <FileTextOutlined />, label: '执行日志' },
+  { key: '/observability', icon: <LineChartOutlined />, label: '模型追踪' },
+  { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
 ];
 
 export default function MainLayout() {

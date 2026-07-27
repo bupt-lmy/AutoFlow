@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
@@ -87,7 +87,7 @@ class AgentConfig(BaseModel):
     tools: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)  # 用于能力发现和 Agent 分类
     can_request: list[str] = Field(default_factory=list)
-    max_concurrent: int = 1
+    max_concurrent: int = Field(default=1, ge=1, le=128)
     retry_limit: int = 3
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     parameters: dict[str, Any] = Field(default_factory=dict)  # 自定义扩展参数
@@ -246,16 +246,79 @@ class SupervisorConfig(BaseModel):
     )
     planning_enabled: bool = True  # 是否在开头做全局规划
     intervention_on_failure: bool = True  # agent 失败时是否自动介入纠偏
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    require_terminal_candidate: bool = False
+    require_evidence: bool = False
+    evidence_fields: list[str] = Field(
+        default_factory=lambda: [
+            "evidence",
+            "artifacts",
+            "quality_report",
+            "test_results",
+            "checks",
+            "verification",
+        ]
+    )
+    max_attempts_per_agent: int = Field(default=4, ge=1, le=100)
+    max_repeated_decisions: int = Field(default=2, ge=1, le=20)
+    review_history_limit: int = Field(default=20, ge=1, le=200)
 
     @field_validator("responsibility")
     @classmethod
     def normalize_responsibility(cls, value: str) -> str:
         return value.strip()
 
-    @field_validator("capabilities")
+    @field_validator("capabilities", "acceptance_criteria", "evidence_fields")
     @classmethod
-    def normalize_capabilities(cls, value: list[str]) -> list[str]:
+    def normalize_string_list(cls, value: list[str]) -> list[str]:
         return list(dict.fromkeys(item.strip() for item in value if item.strip()))
+
+
+class HostingStopCondition(BaseModel):
+    """A result-level condition that stops a continuously hosted workflow."""
+
+    field: str = "output.stop"
+    operator: Literal["eq", "neq", "contains", "gt", "gte", "lt", "lte"] = "eq"
+    value: Any = True
+
+    @field_validator("field")
+    @classmethod
+    def normalize_field(cls, value: str) -> str:
+        field = value.strip().strip(".")
+        if not field:
+            raise ValueError("Hosting stop condition field cannot be blank")
+        return field
+
+    def evaluate(self, result: dict[str, Any]) -> bool:
+        actual: Any = result
+        for part in self.field.split("."):
+            if not isinstance(actual, dict) or part not in actual:
+                return False
+            actual = actual[part]
+        operations = {
+            "eq": lambda a, b: a == b,
+            "neq": lambda a, b: a != b,
+            "contains": lambda a, b: b in a if isinstance(a, (str, list, dict)) else False,
+            "gt": lambda a, b: a > b,
+            "gte": lambda a, b: a >= b,
+            "lt": lambda a, b: a < b,
+            "lte": lambda a, b: a <= b,
+        }
+        try:
+            return bool(operations[self.operator](actual, self.value))
+        except (TypeError, ValueError):
+            return False
+
+
+class HostingConfig(BaseModel):
+    """Cross-run continuous execution policy for a hosted workflow."""
+
+    enabled: bool = False
+    input: str = ""
+    max_cycles: int = Field(default=100, ge=1, le=1_000_000)
+    interval_seconds: float = Field(default=0, ge=0, le=86_400)
+    stop_on_error: bool = True
+    stop_condition: HostingStopCondition | None = None
 
 
 class FlowConfig(BaseModel):
@@ -287,6 +350,7 @@ class WorkflowConfig(BaseModel):
     agents: list[str] = Field(default_factory=list)
     agent_instances: list[AgentInstanceConfig] = Field(default_factory=list)
     flow: FlowConfig
+    hosting: HostingConfig = Field(default_factory=HostingConfig)
     context: dict[str, Any] = Field(default_factory=dict)
 
 

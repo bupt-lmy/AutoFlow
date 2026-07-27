@@ -16,8 +16,26 @@ workflow:
 
     supervisor:
       agent_id: agent-supervisor
+      responsibility: >-
+        审阅编码、测试和发布节点的每次完整结果，检查是否满足质量门禁，并决定继续、
+        返工、改派或结束工作流。
+      capabilities:
+        - execution planning
+        - code and test result review
+        - routing control
+        - failure recovery
       planning_enabled: true
       intervention_on_failure: true
+      acceptance_criteria:
+        - 编码结果满足原始需求
+        - 测试节点确认关键用例通过
+        - 发布节点返回可交付产物
+      require_terminal_candidate: true
+      # BaseAgent 默认把模型回答放在 content；自定义 Agent 能返回 evidence/checks 等字段时可开启。
+      require_evidence: false
+      max_attempts_per_agent: 4
+      max_repeated_decisions: 2
+      review_history_limit: 20
 
     max_iterations: 15
     timeout: 3600

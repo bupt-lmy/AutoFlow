@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from axonflow.tools.video_features import VideoSceneFeatureTool
+from axonflow.tools.video_features import VideoActivityScanTool, VideoSceneFeatureTool
 
 
 async def _silent_static_and_motion_source(path) -> None:
@@ -55,10 +55,44 @@ async def test_silent_motion_scores_above_static_scene(tmp_path) -> None:
     output = json.loads(result.output or "{}")
     static, motion = output["scenes"]
     assert len(static["sample_frames"]) == 5
-    assert len(motion["sample_frames"]) == 5
+    assert 5 <= len(motion["sample_frames"]) <= 12
+    assert motion["sampling"]["strategy"] == "event_driven_adaptive"
+    assert any(
+        frame["role"] == "primary_event_peak" for frame in motion["sample_frames"]
+    )
+    assert all("event_activity" in row for row in motion["feature_samples"])
     assert static["features"]["audio_energy"] == 0
     assert motion["features"]["audio_energy"] == 0
     assert static["features"]["freeze_ratio"] >= 0.8
     assert static["features"]["black_ratio"] >= 0.8
     assert motion["features"]["motion_intensity"] > static["features"]["motion_intensity"]
     assert output["feature_summary"]["motion_ranked_scene_ids"][0] == "scene-motion"
+
+
+async def test_fine_scan_produces_high_frequency_event_curve(tmp_path) -> None:
+    source = tmp_path / "fine-scan.mp4"
+    await _silent_static_and_motion_source(source)
+
+    result = await VideoActivityScanTool().execute(
+        source_path=str(source),
+        intervals=[
+            {
+                "scene_id": "scene-motion",
+                "start_ms": 2000,
+                "end_ms": 4000,
+            }
+        ],
+        analysis_fps=12,
+    )
+
+    assert result.success is True, result.error
+    output = json.loads(result.output or "{}")
+    rows = output["intervals"][0]["feature_samples"]
+    assert len(rows) >= 20
+    assert output["analysis_fps"] == 12
+    assert max(row["event_activity"] for row in rows) > 0
+    spacings = [
+        right["timestamp_ms"] - left["timestamp_ms"]
+        for left, right in zip(rows, rows[1:], strict=False)
+    ]
+    assert max(spacings) <= 100

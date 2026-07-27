@@ -7,6 +7,7 @@ from pathlib import Path
 from axonflow.engine import AxonFlowEngine
 from axonflow.media.jobs import RenderJobRunner
 from axonflow.media.storage import LocalMediaStorage
+from axonflow.platform.hosting import HostedWorkflowManager
 from axonflow.platform.store import PlatformStore
 
 _engine: AxonFlowEngine | None = None
@@ -14,6 +15,7 @@ _config_dir: Path = Path("config")
 _platform_store: PlatformStore | None = None
 _media_storage: LocalMediaStorage | None = None
 _render_job_runner: RenderJobRunner | None = None
+_hosting_manager: HostedWorkflowManager | None = None
 
 
 def set_engine(engine: AxonFlowEngine) -> None:
@@ -67,3 +69,14 @@ def get_render_job_runner() -> RenderJobRunner:
     if _render_job_runner is None:
         raise RuntimeError("Render job runner not initialized")
     return _render_job_runner
+
+
+def set_hosting_manager(manager: HostedWorkflowManager) -> None:
+    global _hosting_manager
+    _hosting_manager = manager
+
+
+def get_hosting_manager() -> HostedWorkflowManager:
+    if _hosting_manager is None:
+        raise RuntimeError("Hosted workflow manager not initialized")
+    return _hosting_manager

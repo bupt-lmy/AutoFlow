@@ -1,0 +1,18 @@
+{
+  "url": "http://127.0.0.1:5173/workflows",
+  "timeout_ms": 20000,
+  "actions": [
+    {"type": "wait_for_text", "text": "Workflows"},
+    {"type": "expect_text", "text": "Build, schedule, and monitor multi-agent workflows."},
+    {"type": "expect_text", "text": "New Workflow"},
+    {"type": "screenshot", "path": "artifacts/acceptance/workflows-initial.png"},
+    {"type": "fill", "label": "Search workflows", "value": "supervised"},
+    {"type": "expect_text", "text": "of"},
+    {"type": "screenshot", "path": "artifacts/acceptance/workflows-search.png"},
+    {"type": "fill", "label": "Search workflows", "value": "no-such-workflow-xyz"},
+    {"type": "expect_text", "text": "No workflows match these filters."},
+    {"type": "expect_text", "text": "Clear filters"},
+    {"type": "click", "role": "button", "name": "Clear filters"},
+    {"type": "screenshot", "path": "artifacts/acceptance/workflows-no-match.png"}
+  ]
+}

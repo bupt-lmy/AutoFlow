@@ -1,0 +1,28 @@
+workflow:
+  id: video-edit-mvp
+  name: "影视自动剪辑 MVP"
+  trigger:
+    type: manual
+  agents:
+    - agent-media-inspector
+    - agent-timeline-planner
+    - agent-media-renderer
+  flow:
+    mode: flat
+    entry: agent-media-inspector
+    max_iterations: 6
+    timeout: 7200
+    routes:
+      agent-media-inspector:
+        - target: agent-timeline-planner
+          condition: {field: status, operator: eq, value: success}
+      agent-timeline-planner:
+        - target: agent-media-renderer
+          condition: {field: status, operator: eq, value: success}
+          payload_mapping:
+            include: [timeline, assets, output_path]
+    terminate_on:
+      - {agent: agent-media-renderer, status: success}
+  context:
+    media_contract_version: "1.0"
+    renderer_profile: "single-video-track-v1"

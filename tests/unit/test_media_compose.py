@@ -114,3 +114,36 @@ async def test_quality_agent_promotes_passed_report() -> None:
     assert result["status"] == "success"
     assert result["quality_report"]["verdict"] == "passed"
     assert registry.execute.await_args.args[0] == "media_quality_check"
+
+
+async def test_quality_agent_checks_requested_edit_duration() -> None:
+    registry = Mock()
+    registry.execute = AsyncMock(
+        return_value=ToolResult(
+            success=True,
+            output='{"verdict":"passed","checks":{"duration":true}}',
+        )
+    )
+    agent = MediaQualityAgent(
+        AgentConfig(id="quality", name="Quality", memory={"enabled": False}),
+        Mock(),
+        Mock(),
+        registry,
+    )
+
+    await agent.handle_message(
+        _message(
+            {
+                "composed_video": {
+                    "output_path": "/composed/result.mp4",
+                    "duration_ms": 3100,
+                    "width": 1920,
+                    "height": 1080,
+                },
+                "refinement_report": {"target_duration_ms": 30_000},
+            }
+        )
+    )
+
+    arguments = registry.execute.await_args.args[1]
+    assert arguments["expected_duration_ms"] == 30_000

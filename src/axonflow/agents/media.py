@@ -214,13 +214,19 @@ class MediaQualityAgent(BaseAgent):
         composed = message.payload.get("composed_video")
         if not isinstance(composed, dict) or not isinstance(composed.get("output_path"), str):
             return {"status": "error", "error": "Quality Agent requires composed_video"}
+        refinement = message.payload.get("refinement_report")
+        expected_duration_ms = composed.get("duration_ms", 12000)
+        if isinstance(refinement, dict) and isinstance(
+            refinement.get("target_duration_ms"), int
+        ):
+            expected_duration_ms = refinement["target_duration_ms"]
         result = await self.tool_registry.execute(
             "media_quality_check",
             {
                 "path": composed["output_path"],
                 "expected_width": composed.get("width", 1920),
                 "expected_height": composed.get("height", 1080),
-                "expected_duration_ms": composed.get("duration_ms", 12000),
+                "expected_duration_ms": expected_duration_ms,
                 "expect_subtitles": composed.get("has_subtitles", False),
             },
         )
@@ -241,6 +247,7 @@ class MediaQualityAgent(BaseAgent):
             "refinement_report",
             "description",
             "subtitle",
+            "source_provenance",
         ):
             if field in message.payload:
                 output[field] = message.payload[field]
@@ -326,6 +333,7 @@ class MediaAssetRegisterAgent(BaseAgent):
             "refinement_report",
             "description",
             "subtitle",
+            "source_provenance",
         ):
             if field in message.payload:
                 output[field] = message.payload[field]

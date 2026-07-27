@@ -1,0 +1,9 @@
+agent:
+  id: agent-media-rights-gate
+  name: "影视素材授权门禁"
+  role: "校验素材来源和使用方式；公开官方宣传素材仅允许内部演示，发布或商业用途必须显式确认授权。"
+  agent_type: custom
+  class_path: axonflow.agents.movie_discovery.MediaRightsGateAgent
+  tools: []
+  retry_limit: 1
+  memory: {enabled: false}

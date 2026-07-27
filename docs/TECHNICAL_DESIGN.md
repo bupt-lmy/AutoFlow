@@ -1,998 +1,171 @@
-# AxonFlow 技术实现方案
+# AxonFlow 技术设计
 
-> 版本: v1.0  
-> 日期: 2026-03-31  
-> 状态: 草案  
+> 版本：v0.1.0 Alpha · 更新：2026-07-16 · 范围：当前实现
 
----
+## 架构概览
 
-## 1. 技术选型总览
-
-| 维度 | 选型 | 理由 |
-|------|------|------|
-| 编程语言 | Python 3.11+ | AI/LLM 生态成熟，asyncio 异步支持好 |
-| 异步框架 | asyncio + aiohttp | 原生协程支持，适合 I/O 密集型 Agent 场景 |
-| 消息队列 | Redis Streams | 轻量级、持久化、消费者组支持，部署简单 |
-| LLM 集成 | LiteLLM | 统一接口适配 100+ LLM Provider |
-| 配置管理 | Pydantic + PyYAML | 类型安全的配置解析与校验 |
-| CLI 框架 | Click / Typer | 声明式 CLI 构建，自动生成帮助文档 |
-| 日志系统 | structlog | 结构化日志，便于机器解析和检索 |
-| 进程管理 | systemd / supervisord | 守护进程管理与自动重启 |
-| 测试框架 | pytest + pytest-asyncio | 异步测试支持好 |
-| 包管理 | uv / poetry | 现代 Python 依赖管理 |
-
----
-
-## 2. 系统架构
-
-### 2.1 整体架构图
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        AxonFlow Engine                       │
-│                                                              │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
-│  │ Agent A  │  │ Agent B  │  │ Agent C  │  │ Agent N  │    │
-│  │ (Coder)  │  │ (Tester) │  │(Publisher)│  │  (...)   │    │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘    │
-│       │              │              │              │          │
-│  ┌────▼──────────────▼──────────────▼──────────────▼─────┐   │
-│  │              Message Bus (Redis Streams)               │   │
-│  └────┬──────────────┬──────────────┬──────────────┬─────┘   │
-│       │              │              │              │          │
-│  ┌────▼─────┐  ┌─────▼────┐  ┌─────▼────┐  ┌─────▼────┐   │
-│  │Workflow  │  │  Tool    │  │   LLM    │  │  State   │   │
-│  │Orchestr. │  │ Registry │  │ Gateway  │  │  Store   │   │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │              Observability Layer                       │   │
-│  │  (Structured Logs / Metrics / Trace / Dashboard)      │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │              CLI Interface (Typer)                     │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+```text
+                         ┌───────────────────────────┐
+                         │ CLI / React 管理台         │
+                         └─────────────┬─────────────┘
+                                       │
+                         ┌─────────────▼─────────────┐
+                         │ FastAPI + WebSocket        │
+                         │ 平台数据（SQLite）          │
+                         └─────────────┬─────────────┘
+                                       │
+┌────────────────────────▼─────────────────────────────────────────────┐
+│ AxonFlowEngine                                                        │
+│  Config loader · AgentRegistry · ToolRegistry · Scheduler             │
+│                                                                         │
+│  ┌──────────────────┐        ┌─────────────────────────────────────┐ │
+│  │ Orchestrator     │        │ Agent Runtime                       │ │
+│  │ Flat / Supervisor├──消息──► Base / Remote / DiscoveredAgent      │ │
+│  └────────┬─────────┘        │ LLM → Tool Calls → Observation loop │ │
+│           │                  └───────┬─────────────────────┬───────┘ │
+│  ┌────────▼─────────┐                │                     │         │
+│  │ MessageBus       │          ┌─────▼─────┐         ┌────▼──────┐  │
+│  │ Redis / Memory   │          │ LLMGateway│         │ ToolRegistry│ │
+│  └──────────────────┘          │ LiteLLM   │         └───────────┘  │
+│                                └───────────┘                         │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 核心分层
-
-```
-┌─────────────────┐
-│   Interface      │  CLI / API / Dashboard
-├─────────────────┤
-│   Orchestration  │  Workflow Engine / Scheduler / Cron
-├─────────────────┤
-│   Agent          │  Agent Runtime / LLM Integration / Tool Execution
-├─────────────────┤
-│   Messaging      │  Message Bus / Protocol / Serialization
-├─────────────────┤
-│   Infrastructure │  Redis / Storage / Config / Logging
-└─────────────────┘
-```
-
----
-
-## 3. 核心模块设计
-
-### 3.1 Agent 运行时 (Agent Runtime)
-
-每个 Agent 是一个独立的异步任务（asyncio.Task），持续监听自己的消息队列。
-
-```python
-# 核心 Agent 基类设计
-class BaseAgent(ABC):
-    """智能体基类"""
-
-    def __init__(self, config: AgentConfig):
-        self.id: str = config.id
-        self.name: str = config.name
-        self.role: str = config.role
-        self.model: ModelConfig = config.model
-        self.tools: list[Tool] = []
-        self.message_bus: MessageBus = None
-        self.state: AgentState = AgentState.IDLE
-
-    async def start(self):
-        """启动 Agent，开始监听消息队列"""
-        self.state = AgentState.RUNNING
-        while self.state == AgentState.RUNNING:
-            message = await self.message_bus.receive(self.id)
-            if message:
-                self.state = AgentState.WORKING
-                try:
-                    result = await self.handle_message(message)
-                    await self._send_response(message, result)
-                except Exception as e:
-                    await self._handle_error(message, e)
-                finally:
-                    self.state = AgentState.RUNNING
-
-    async def handle_message(self, message: Message) -> AgentResult:
-        """处理消息的核心逻辑"""
-        # 1. 构建 Prompt（系统提示 + 上下文 + 用户消息）
-        prompt = self._build_prompt(message)
-        # 2. 调用 LLM
-        llm_response = await self.llm_client.chat(prompt)
-        # 3. 解析 LLM 输出，判断是否需要调用工具
-        actions = self._parse_actions(llm_response)
-        # 4. 执行工具调用
-        results = await self._execute_actions(actions)
-        # 5. 汇总结果
-        return AgentResult(output=results, status="success")
-
-    async def send_request(self, target_agent_id: str, payload: dict):
-        """向其他智能体发起请求"""
-        message = Message(
-            sender=self.id,
-            receiver=target_agent_id,
-            type=MessageType.TASK_REQUEST,
-            payload=payload,
-        )
-        await self.message_bus.send(message)
-
-    @abstractmethod
-    async def _build_prompt(self, message: Message) -> list[dict]:
-        """由子类实现具体的 Prompt 构建逻辑"""
-        ...
-```
-
-**Agent 状态机：**
-
-```
-          ┌──────────────┐
-          │    IDLE       │ (刚创建，未启动)
-          └──────┬───────┘
-                 │ start()
-          ┌──────▼───────┐
-     ┌───→│   RUNNING     │←──────┐
-     │    │ (监听消息中)   │       │
-     │    └──────┬───────┘       │
-     │           │ 收到消息       │ 处理完成
-     │    ┌──────▼───────┐       │
-     │    │   WORKING     │───────┘
-     │    │ (处理任务中)   │
-     │    └──────┬───────┘
-     │           │ 异常
-     │    ┌──────▼───────┐
-     │    │    ERROR      │
-     │    └──────┬───────┘
-     │           │ 恢复
-     └───────────┘
-```
-
-### 3.2 消息系统 (Message Bus)
-
-#### 3.2.1 消息协议
-
-```python
-@dataclass
-class Message:
-    """统一消息格式"""
-    id: str                      # 消息唯一 ID (UUID)
-    workflow_id: str             # 所属工作流 ID
-    step_id: str                # 当前步骤 ID
-    sender: str                  # 发送方 Agent ID
-    receiver: str                # 接收方 Agent ID
-    type: MessageType            # 消息类型
-    priority: int                # 优先级 (1-10, 10 最高)
-    payload: dict                # 负载数据
-    context: dict                # 共享上下文引用
-    created_at: datetime         # 创建时间
-    ttl: int | None              # 过期时间（秒）
-    parent_message_id: str | None  # 父消息 ID（用于追踪链路）
-
-class MessageType(Enum):
-    TASK_REQUEST = "task_request"     # 任务请求
-    TASK_RESPONSE = "task_response"   # 任务响应
-    FEEDBACK = "feedback"             # 反馈（如测试失败的详情）
-    ERROR = "error"                   # 异常通知
-    HEARTBEAT = "heartbeat"          # 心跳
-    CONTROL = "control"              # 控制指令（暂停/恢复/终止）
-```
-
-#### 3.2.2 Redis Streams 实现
-
-```python
-class RedisMessageBus(MessageBus):
-    """基于 Redis Streams 的消息总线"""
-
-    def __init__(self, redis_url: str):
-        self.redis = aioredis.from_url(redis_url)
-
-    async def send(self, message: Message):
-        """发送消息到目标 Agent 的 Stream"""
-        stream_key = f"axonflow:agent:{message.receiver}:inbox"
-        await self.redis.xadd(
-            stream_key,
-            {"data": message.to_json()},
-        )
-
-    async def receive(self, agent_id: str, block_ms: int = 5000) -> Message | None:
-        """从自己的 inbox Stream 中读取消息"""
-        stream_key = f"axonflow:agent:{agent_id}:inbox"
-        group_name = f"agent-{agent_id}-group"
-        consumer_name = f"agent-{agent_id}-consumer"
-
-        # 使用消费者组确保消息不被重复消费
-        results = await self.redis.xreadgroup(
-            groupname=group_name,
-            consumername=consumer_name,
-            streams={stream_key: ">"},
-            count=1,
-            block=block_ms,
-        )
-        if results:
-            stream, messages = results[0]
-            msg_id, data = messages[0]
-            message = Message.from_json(data[b"data"])
-            # ACK 消息
-            await self.redis.xack(stream_key, group_name, msg_id)
-            return message
-        return None
-
-    async def get_queue_depth(self, agent_id: str) -> int:
-        """获取指定 Agent 的消息队列深度"""
-        stream_key = f"axonflow:agent:{agent_id}:inbox"
-        return await self.redis.xlen(stream_key)
-```
-
-#### 3.2.3 进程内降级方案
-
-当 Redis 不可用时，自动降级到进程内 asyncio.Queue：
-
-```python
-class InMemoryMessageBus(MessageBus):
-    """进程内消息总线（开发/测试用或降级方案）"""
-
-    def __init__(self):
-        self._queues: dict[str, asyncio.Queue] = {}
-
-    async def send(self, message: Message):
-        queue = self._get_queue(message.receiver)
-        await queue.put(message)
-
-    async def receive(self, agent_id: str, block_ms: int = 5000) -> Message | None:
-        queue = self._get_queue(agent_id)
-        try:
-            return await asyncio.wait_for(
-                queue.get(), timeout=block_ms / 1000
-            )
-        except asyncio.TimeoutError:
-            return None
-
-    def _get_queue(self, agent_id: str) -> asyncio.Queue:
-        if agent_id not in self._queues:
-            self._queues[agent_id] = asyncio.Queue()
-        return self._queues[agent_id]
-```
-
-### 3.3 工作流引擎 (Workflow Orchestrator)
-
-```python
-class WorkflowOrchestrator:
-    """工作流编排引擎"""
-
-    def __init__(self, config: WorkflowConfig, agent_registry: AgentRegistry):
-        self.config = config
-        self.agents = agent_registry
-        self.state_store = StateStore()
-        self.iteration_count = 0
-
-    async def execute(self, initial_input: str) -> WorkflowResult:
-        """执行工作流"""
-        # 1. 初始化工作流上下文
-        ctx = WorkflowContext(
-            workflow_id=str(uuid4()),
-            input=initial_input,
-            shared_state={},
-        )
-        self.state_store.save(ctx)
-
-        # 2. 向入口 Agent 发送初始任务
-        entry_agent = self.config.flow.entry
-        await self._dispatch(
-            ctx=ctx,
-            target=entry_agent,
-            payload={"task": initial_input},
-        )
-
-        # 3. 事件循环：监听结果，驱动流转
-        while self.iteration_count < self.config.flow.max_iterations:
-            event = await self._wait_for_event(ctx)
-
-            if self._is_terminal(event):
-                return WorkflowResult(
-                    status="completed",
-                    output=event.payload,
-                    iterations=self.iteration_count,
-                )
-
-            # 根据事件类型和工作流定义，决定下一步
-            next_actions = self._resolve_next(event)
-            for action in next_actions:
-                await self._dispatch(ctx, action.target, action.payload)
-
-            self.iteration_count += 1
-
-        return WorkflowResult(
-            status="max_iterations_reached",
-            iterations=self.iteration_count,
-        )
-
-    def _resolve_next(self, event: WorkflowEvent) -> list[Action]:
-        """根据当前事件解析下一步动作"""
-        sender = event.sender
-        status = event.payload.get("status")
-
-        # 查找工作流配置中的路由规则
-        routes = self.config.flow.routes.get(sender, [])
-        matched = []
-        for route in routes:
-            if route.condition is None or route.condition.evaluate(status):
-                matched.append(Action(target=route.target, payload=event.payload))
-        return matched
-```
-
-**工作流上下文：**
-
-```python
-@dataclass
-class WorkflowContext:
-    """工作流执行上下文"""
-    workflow_id: str
-    input: str
-    shared_state: dict            # 各 Agent 可读写的共享状态
-    history: list[Message] = field(default_factory=list)  # 消息历史
-    created_at: datetime = field(default_factory=datetime.now)
-    iteration: int = 0
-
-    def update_state(self, key: str, value: any):
-        self.shared_state[key] = value
-
-    def get_state(self, key: str, default=None):
-        return self.shared_state.get(key, default)
-```
-
-### 3.4 LLM 网关 (LLM Gateway)
-
-```python
-class LLMGateway:
-    """统一 LLM 调用网关"""
-
-    def __init__(self, config: LLMConfig):
-        self.config = config
-        self.token_tracker = TokenTracker()
-        self.fallback_chain = config.fallback_models or []
-
-    async def chat(
-        self,
-        messages: list[dict],
-        model: str | None = None,
-        **kwargs
-    ) -> LLMResponse:
-        """统一 LLM 调用入口"""
-        model = model or self.config.default_model
-
-        # 检查 Token 预算
-        if self.token_tracker.is_budget_exceeded():
-            raise BudgetExceededError(
-                f"Token budget exceeded: {self.token_tracker.total_tokens}"
-            )
-
-        try:
-            # 使用 LiteLLM 统一调用
-            response = await litellm.acompletion(
-                model=model,
-                messages=messages,
-                **kwargs,
-            )
-            # 记录 Token 用量
-            self.token_tracker.record(
-                model=model,
-                input_tokens=response.usage.prompt_tokens,
-                output_tokens=response.usage.completion_tokens,
-            )
-            return LLMResponse(
-                content=response.choices[0].message.content,
-                model=model,
-                usage=response.usage,
-            )
-        except Exception as e:
-            # 尝试降级到备用模型
-            return await self._fallback(messages, e, **kwargs)
-
-    async def _fallback(self, messages, error, **kwargs) -> LLMResponse:
-        """模型降级"""
-        for fallback_model in self.fallback_chain:
-            try:
-                logger.warning(
-                    "llm_fallback",
-                    original_error=str(error),
-                    fallback_model=fallback_model,
-                )
-                return await self.chat(
-                    messages, model=fallback_model, **kwargs
-                )
-            except Exception:
-                continue
-        raise LLMUnavailableError("All LLM models unavailable")
-```
-
-### 3.5 工具系统 (Tool System)
-
-```python
-class ToolRegistry:
-    """工具注册中心"""
-
-    def __init__(self):
-        self._tools: dict[str, Tool] = {}
-
-    def register(self, tool: Tool):
-        self._tools[tool.name] = tool
-
-    def get(self, name: str) -> Tool | None:
-        return self._tools.get(name)
-
-    def get_schemas(self, tool_names: list[str]) -> list[dict]:
-        """获取工具的 JSON Schema（用于 LLM Function Calling）"""
-        return [
-            self._tools[name].to_schema()
-            for name in tool_names
-            if name in self._tools
-        ]
-
-
-class Tool(ABC):
-    """工具基类"""
-
-    name: str
-    description: str
-    parameters: dict  # JSON Schema
-
-    @abstractmethod
-    async def execute(self, **kwargs) -> ToolResult:
-        """执行工具"""
-        ...
-
-    def to_schema(self) -> dict:
-        """转换为 LLM Function Calling 格式"""
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
-        }
-
-
-# 内置工具示例
-class ShellExecTool(Tool):
-    name = "shell_exec"
-    description = "执行 Shell 命令并返回输出"
-    parameters = {
-        "type": "object",
-        "properties": {
-            "command": {
-                "type": "string",
-                "description": "要执行的 Shell 命令",
-            },
-            "timeout": {
-                "type": "integer",
-                "description": "超时时间（秒），默认 30",
-                "default": 30,
-            },
-        },
-        "required": ["command"],
-    }
-
-    async def execute(self, command: str, timeout: int = 30) -> ToolResult:
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
-            return ToolResult(
-                success=proc.returncode == 0,
-                output=stdout.decode(),
-                error=stderr.decode() if proc.returncode != 0 else None,
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            return ToolResult(success=False, error=f"Command timed out after {timeout}s")
-
-
-class FileWriteTool(Tool):
-    name = "file_write"
-    description = "将内容写入指定文件"
-    parameters = {
-        "type": "object",
-        "properties": {
-            "path": {"type": "string", "description": "文件路径"},
-            "content": {"type": "string", "description": "文件内容"},
-        },
-        "required": ["path", "content"],
-    }
-
-    async def execute(self, path: str, content: str) -> ToolResult:
-        try:
-            file_path = Path(path)
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(content, encoding="utf-8")
-            return ToolResult(success=True, output=f"File written: {path}")
-        except Exception as e:
-            return ToolResult(success=False, error=str(e))
-```
-
-### 3.6 调度系统 (Scheduler)
-
-```python
-class Scheduler:
-    """定时任务调度器"""
-
-    def __init__(self):
-        self._jobs: list[ScheduledJob] = []
-        self._running = False
-
-    def add_cron_job(
-        self,
-        workflow_id: str,
-        cron_expr: str,
-        input_data: str,
-    ):
-        """添加 Cron 定时任务"""
-        job = ScheduledJob(
-            workflow_id=workflow_id,
-            cron=CronExpression(cron_expr),
-            input=input_data,
-        )
-        self._jobs.append(job)
-
-    async def start(self):
-        """启动调度循环"""
-        self._running = True
-        while self._running:
-            now = datetime.now()
-            for job in self._jobs:
-                if job.cron.should_run(now) and not job.is_running:
-                    asyncio.create_task(self._execute_job(job))
-            await asyncio.sleep(1)  # 每秒检查一次
-
-    async def _execute_job(self, job: ScheduledJob):
-        """执行调度任务"""
-        job.is_running = True
-        try:
-            orchestrator = WorkflowOrchestrator(
-                config=self._load_workflow(job.workflow_id),
-                agent_registry=self.agent_registry,
-            )
-            result = await orchestrator.execute(job.input)
-            logger.info("scheduled_job_completed", job=job, result=result)
-        except Exception as e:
-            logger.error("scheduled_job_failed", job=job, error=str(e))
-        finally:
-            job.is_running = False
-            job.last_run = datetime.now()
-```
-
----
-
-## 4. 数据模型
-
-### 4.1 配置模型
-
-```python
-# ===== 智能体配置 =====
-class ModelConfig(BaseModel):
-    provider: str = "openai"         # openai / anthropic / ollama
-    name: str = "gpt-4o"            # 模型名称
-    temperature: float = 0.7
-    max_tokens: int = 4096
-    api_base: str | None = None      # 自定义 API 地址
-    api_key_env: str | None = None   # API Key 环境变量名
-
-class AgentConfig(BaseModel):
-    id: str                          # 唯一标识
-    name: str                        # 显示名称
-    role: str                        # 角色 Prompt
-    model: ModelConfig               # LLM 配置
-    tools: list[str] = []            # 可用工具列表
-    can_request: list[str] = []      # 可以向哪些 Agent 发请求
-    max_concurrent: int = 1          # 最大并发处理数
-
-# ===== 工作流配置 =====
-class TriggerConfig(BaseModel):
-    type: str                        # manual / cron / event
-    cron: str | None = None          # Cron 表达式
-    event: str | None = None         # 事件名称
-
-class RouteCondition(BaseModel):
-    field: str                       # 判断字段
-    operator: str                    # eq / neq / contains / gt / lt
-    value: Any                       # 期望值
-
-class Route(BaseModel):
-    target: str                      # 目标 Agent ID
-    condition: RouteCondition | None = None  # 路由条件（空=默认路由）
-
-class FlowConfig(BaseModel):
-    entry: str                       # 入口 Agent ID
-    max_iterations: int = 10         # 最大迭代次数
-    timeout: int = 3600              # 工作流超时（秒）
-    routes: dict[str, list[Route]] = {}  # Agent ID → 路由规则列表
-    terminate_on: list[dict] = []    # 终止条件
-
-class WorkflowConfig(BaseModel):
-    id: str
-    name: str
-    trigger: TriggerConfig
-    agents: list[str]                # 参与的 Agent ID 列表
-    flow: FlowConfig
-    context: dict = {}               # 初始共享上下文
-```
-
-### 4.2 运行时数据模型
-
-```python
-class AgentState(Enum):
-    IDLE = "idle"
-    RUNNING = "running"
-    WORKING = "working"
-    ERROR = "error"
-    STOPPED = "stopped"
-
-class WorkflowStatus(Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    TIMEOUT = "timeout"
-    MAX_ITERATIONS = "max_iterations"
-
-@dataclass
-class ToolResult:
-    success: bool
-    output: str | None = None
-    error: str | None = None
-
-@dataclass
-class AgentResult:
-    output: Any
-    status: str
-    tool_calls: list[dict] = field(default_factory=list)
-    tokens_used: int = 0
-
-@dataclass
-class WorkflowResult:
-    status: str
-    output: Any = None
-    iterations: int = 0
-    duration_seconds: float = 0
-    total_tokens: int = 0
-```
-
----
-
-## 5. 关键流程
-
-### 5.1 消息处理流程
-
-```
-Agent 收到消息
-      │
-      ▼
-  构建 Prompt
-  ┌──────────────────────────────┐
-  │ System: {role prompt}        │
-  │ Context: {workflow context}  │
-  │ History: {recent messages}   │
-  │ Task: {message payload}      │
-  │ Tools: {available tools}     │
-  └──────────────────────────────┘
-      │
-      ▼
-  调用 LLM (通过 LLM Gateway)
-      │
-      ▼
-  解析 LLM 输出
-      │
-      ├── 需要调用工具？
-      │       │
-      │       ▼ Yes
-      │   执行工具 → 获取结果 → 再次调用 LLM（附带工具结果）
-      │       │
-      │       ▼
-      │   (循环直到 LLM 给出最终回答)
-      │
-      ├── 需要请求其他 Agent？
-      │       │
-      │       ▼ Yes
-      │   构建 Message → 通过 MessageBus 发送
-      │
-      └── 最终回答
-              │
-              ▼
-         发送结果消息给 Orchestrator
-```
-
-### 5.2 工作流生命周期
-
-```
-用户提交任务
-      │
-      ▼
-  创建 WorkflowContext
-      │
-      ▼
-  发送初始消息给 Entry Agent
-      │
-      ▼
-  ┌──────────────────────────┐
-  │   工作流事件循环           │
-  │                           │
-  │   等待事件 ←───────────┐  │
-  │      │                 │  │
-  │      ▼                 │  │
-  │   是否终止条件？        │  │
-  │      │                 │  │
-  │   No ▼                 │  │
-  │   解析路由规则          │  │
-  │      │                 │  │
-  │      ▼                 │  │
-  │   分发消息给下游 Agent  │  │
-  │      │                 │  │
-  │      └─────────────────┘  │
-  │                           │
-  │   Yes ▼                   │
-  │   返回 WorkflowResult     │
-  └──────────────────────────┘
-```
-
-### 5.3 异常恢复流程
-
-```
-Agent 执行异常
-      │
-      ▼
-  记录错误日志 + 错误消息入库
-      │
-      ▼
-  当前步骤重试（最多 3 次）
-      │
-      ├── 重试成功 → 继续正常流程
-      │
-      └── 重试失败
-              │
-              ▼
-         通知 Orchestrator
-              │
-              ▼
-         标记该 Agent 为 ERROR 状态
-              │
-              ▼
-         触发告警（Webhook）
-              │
-              ▼
-         工作流降级处理
-         ├── 跳过该步骤（如果配置了 skip_on_error）
-         └── 终止工作流（默认行为）
-```
-
----
-
-## 6. 安全设计
-
-### 6.1 工具执行沙箱
-
-```python
-class SandboxExecutor:
-    """沙箱化工具执行器"""
-
-    def __init__(self, config: SandboxConfig):
-        self.enabled = config.enabled
-        self.allowed_commands = config.command_whitelist
-        self.blocked_paths = config.blocked_paths
-
-    async def execute(self, tool: Tool, **kwargs) -> ToolResult:
-        if self.enabled:
-            # 命令白名单检查
-            if isinstance(tool, ShellExecTool):
-                cmd = kwargs.get("command", "")
-                if not self._is_allowed(cmd):
-                    return ToolResult(
-                        success=False,
-                        error=f"Command blocked by sandbox policy: {cmd}"
-                    )
-
-            # 文件路径检查
-            if hasattr(kwargs, "path"):
-                if self._is_blocked_path(kwargs["path"]):
-                    return ToolResult(
-                        success=False,
-                        error=f"Path blocked by sandbox policy: {kwargs['path']}"
-                    )
-
-        return await tool.execute(**kwargs)
-```
-
-### 6.2 密钥管理
-
-```python
-class SecretManager:
-    """密钥管理器"""
-
-    @staticmethod
-    def get_api_key(env_var: str) -> str:
-        """从环境变量获取 API Key"""
-        key = os.environ.get(env_var)
-        if not key:
-            raise ConfigError(f"Environment variable {env_var} not set")
-        return key
-
-    @staticmethod
-    def mask_key(key: str) -> str:
-        """脱敏显示"""
-        if len(key) <= 8:
-            return "****"
-        return key[:4] + "****" + key[-4:]
-```
-
----
-
-## 7. 可观测性设计
-
-### 7.1 结构化日志
-
-```python
-import structlog
-
-logger = structlog.get_logger()
-
-# 日志示例
-logger.info(
-    "agent_message_received",
-    agent_id="agent-coder",
-    workflow_id="wf-001",
-    message_type="task_request",
-    queue_depth=3,
-)
-
-logger.info(
-    "llm_call_completed",
-    agent_id="agent-coder",
-    model="gpt-4o",
-    input_tokens=1200,
-    output_tokens=800,
-    latency_ms=2340,
-)
-
-logger.info(
-    "tool_executed",
-    agent_id="agent-coder",
-    tool="file_write",
-    success=True,
-    duration_ms=15,
-)
-```
-
-### 7.2 指标采集
-
-```python
-@dataclass
-class SystemMetrics:
-    """系统运行指标"""
-    active_workflows: int
-    agent_states: dict[str, str]       # agent_id → state
-    queue_depths: dict[str, int]       # agent_id → queue_depth
-    total_tokens_used: int
-    total_tool_calls: int
-    uptime_seconds: float
-    error_count: int
-    llm_calls: int
-    avg_llm_latency_ms: float
-```
-
-### 7.3 Webhook 通知
-
-```python
-class WebhookNotifier:
-    """Webhook 事件通知"""
-
-    async def notify(self, event_type: str, data: dict):
-        """发送 Webhook 通知"""
-        for hook in self.config.webhooks:
-            if event_type in hook.events:
-                payload = {
-                    "event": event_type,
-                    "timestamp": datetime.now().isoformat(),
-                    "data": data,
-                }
-                async with aiohttp.ClientSession() as session:
-                    await session.post(
-                        hook.url,
-                        json=payload,
-                        headers={"Content-Type": "application/json"},
-                    )
-```
-
----
-
-## 8. 部署方案
-
-### 8.1 单机部署（推荐起步方案）
-
-```
-┌─────────────────────────────────┐
-│          主机 / VM               │
-│                                  │
-│  ┌───────────┐  ┌────────────┐  │
-│  │ AxonFlow  │  │   Redis    │  │
-│  │  Engine   │──│  (Streams) │  │
-│  │           │  │            │  │
-│  └───────────┘  └────────────┘  │
-│                                  │
-│  systemd / supervisord 管理进程  │
-└─────────────────────────────────┘
-```
-
-### 8.2 Docker Compose 部署
-
-```yaml
-# docker-compose.yml
-version: "3.8"
-services:
-  axonflow:
-    build: .
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-    volumes:
-      - ./config:/app/config
-      - ./workspace:/app/workspace
-      - ./logs:/app/logs
-    depends_on:
-      - redis
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis-data:/data
-    restart: unless-stopped
-
-volumes:
-  redis-data:
-```
-
-### 8.3 后续扩展：分布式部署
-
-```
-┌──────────┐  ┌──────────┐  ┌──────────┐
-│ Worker 1 │  │ Worker 2 │  │ Worker 3 │
-│ Agent A  │  │ Agent B  │  │ Agent C  │
-└────┬─────┘  └────┬─────┘  └────┬─────┘
-     │              │              │
-     └──────────────┼──────────────┘
+## 运行时
+
+### 引擎与基础设施
+
+`AxonFlowEngine` 负责加载 `config/`、创建消息总线、LLM 网关、工具注册表、共享内存、执行日志和 Agent 注册表，并启动 Agent 消息监听与 Cron 调度。
+
+- 优先使用 `RedisMessageBus`；Redis 连接失败时自动改用 `InMemoryMessageBus`。
+- `PlatformStore` 以 SQLite 保存画布元数据、运行记录、事件、模型配置和加密凭据。
+- `ExecutionLogger` 记录工具调用；API 将其和编排事件通过 WebSocket 推送给订阅运行。
+- LLM Gateway 通过 LiteLLM 调用模型，记录 Token，并可对接 LangSmith。
+
+### Agent
+
+`BaseAgent` 收到任务后执行以下过程：
+
+```text
+任务消息 + Persona + 工作流上下文 + 记忆 + Skill + 工具 Schema
+                           │
+                           ▼
+                         LLM 调用
+                    ┌──────┴──────┐
+              有 tool_calls      文本完成
+                    │               │
+                    ▼               ▼
+               执行工具并回填     TASK_RESPONSE
                     │
-            ┌───────▼───────┐
-            │ Redis Cluster │
-            └───────────────┘
+                    └──最多 10 轮──┘
 ```
 
----
+Agent 支持 Agent/Workflow/Global 三种记忆作用域，保存最近任务和结果。目录式 Agent 配置可将 `soul.md`、`user.md`、`workflow.md` 注入 Prompt；Skill 内容从 `config/skills/` 读取。`RemoteAgent` 将工作流任务转发至 HTTP 服务并使用服务返回的 JSON 作为结果。
 
-## 9. 技术债务与演进方向
+### Agent 有界并发
 
-| 阶段 | 技术债务 | 演进方向 |
-|------|---------|---------|
-| V1.0 | 进程内所有 Agent 共享事件循环 | V2.0 支持多进程/分布式 Worker |
-| V1.0 | 工作流路由规则为静态配置 | V2.0 支持 LLM 动态路由决策 |
-| V1.0 | 仅 CLI 交互 | V2.0 提供 Web Dashboard |
-| V1.0 | 无持久化存储（除 Redis） | V2.0 接入 SQLite/PostgreSQL 存储执行历史 |
-| V1.0 | 无权限模型 | V2.0 引入 RBAC 权限控制 |
+每个 Agent 使用 `max_concurrent` 控制同时执行的任务数，默认值为 1，允许在详情页在线调整。消息循环只在存在空闲执行槽时从消息总线领取下一条任务，因此不会因突发流量无限创建协程。不同 `workflow_id` 的任务可以并行执行；来自同一工作流的消息通过工作流锁保持串行，避免共享 `WorkflowContext` 的读写竞争。运行状态公开当前执行数、等待调度数和活跃工作流 ID。
+
+代码修改、同一路径文件写入及其他具有共享可变资源的 Agent 应保持 `max_concurrent: 1`。无共享状态的模型调用或只读分析 Agent 可以根据模型配额与机器容量提高并发上限。
+
+### Agent 健康状态
+
+Agent 的消息循环状态与可用性分别维护：
+
+- `Activity`：`idle/running/working/error/stopped`，只描述进程内监听和任务执行状态。
+- `Health`：`unknown/checking/healthy/unhealthy`；只有真实模型或远程端点探测成功的 Agent 才是 Ready。
+
+引擎启动时并行发送一次最小 `PING` 命令，之后按 `agent_health.interval_seconds` 定期复检，并记录最后检查时间、成功时间、延迟和错误。Remote Agent 可配置独立 `health_endpoint`，否则向任务 endpoint 发送 `health_check/ping`。可调用 `POST /api/agents/{agent_id}/health-check` 复检单个 Agent，或通过 Dashboard 的刷新按钮调用 `POST /api/agents/health-check` 并发复检全部已注册 Agent。
+
+已知为 `unhealthy` 的 Agent 不参与 Dynamic Agent 和故障替换候选排序。自定义的非 LLM Agent 可覆盖 `_health_probe()` 实现自己的探活契约。
+
+### 消息与上下文
+
+编排器使用 `TASK_REQUEST` 向 Agent 发送任务。Agent 用原消息的 `reply()` 回复，成功时为 `TASK_RESPONSE`，错误时为 `ERROR`。每个工作流创建独立的 `WorkflowContext`，包含原始输入、共享状态、消息历史和迭代计数；上下文会在派发前注入所有参与 Agent。
+
+常规路由经由编排器发生，而非 Agent 彼此直接对话。自定义 Agent 可调用 `send_request()`，但目标必须位于该 Agent 的 `can_request` 白名单。
+
+`Message` 信封统一序列化为 JSON，并包含发送方/接收方、工作流与步骤 ID、父消息 ID、消息类型、优先级、TTL、上下文和字典型 `payload`。`aip-lite/0.1` 增加了 Session/Task ID、TaskCommand/Status/Result、DataItem 和 Product。编排器在 `_protocol` 中传递当前任务；发现包装器再写入选中 Agent、尝试次数和失败记录，Prompt 构建器会将其注入系统提示。
+
+业务 payload 仍是可扩展字典。因此路由所依赖的 `status`、`feedback`、`evidence` 等字段需要由自定义/Remote Agent 或应用约定稳定地产生；AIP-lite 当前也不是完整 AIP-PUB/ACPs 的网络互操作实现。
+
+### 动态发现运行时
+
+`DiscoveredAgent` 是工作流级包装器，向编排器暴露稳定的节点 ID。它使用 `LocalDiscoveryService` 对已注册 `AgentManifest` 执行硬约束过滤和词项排序，在运行时创建选中的具体 Agent：
+
+```text
+工作流节点 ID
+    │
+    ├─ Dynamic Agent ──ADP-lite 排名──候选 1──错误/超时──候选 2──成功
+    │
+    └─ 固定 Agent ──首选模板──错误/超时──ADP-lite 替代者
+```
+
+候选执行结果仍以节点 ID 返回，所以 Flat/Supervisor 路由、join、终止条件和运行记录不需要知道具体模板。当前 Provider 只搜索本地注册表；未来可替换为外部目录 Provider。
+
+## 编排器
+
+### FlatOrchestrator
+
+默认的 `flat` 模式读取 `flow.entry` 和 `flow.routes`：
+
+1. 入口 Agent 接收初始任务。
+2. 编排器接收结果后，检查 `terminate_on`。
+3. 所有匹配的路由都被派发，因此一个节点可扇出到多个下游。
+4. 配置了 `join` 的节点等待其 `wait_for` 列表按 `all` 或 `any` 满足后获得合并 payload。
+5. 一条路由可回指上游，形成受 `max_iterations`、`timeout` 限制的回路。
+
+路由条件直接读取响应 payload 字段，支持 `eq`、`neq`、`contains`、`gt`、`lt`。判断由编排器确定性执行，不经过 Prompt。上游 Agent 仍必须实际产生相应结构化字段，例如只有结果真的携带 `status: error`，失败分支才会生效。`payload_mapping.include` 可筛选传给下游的顶层业务字段，`payload_mapping.task_field` 可把指定字段提升为下游 `task`；协议元数据不受业务筛选影响。
+
+Cron Trigger 保存表达式、IANA 时区和固定运行输入。工作流 API 在创建/更新后立即向进程内 Scheduler 执行 upsert/remove，服务重启时再从持久化 YAML 加载。调度器维护下一触发时间并禁止同一任务重叠执行；定时运行写入 SQLite Run History。当前不提供停机补跑或多实例分布式锁，因此 7×24 部署仍依赖外部进程守护与持久卷。
+
+连续托管由 `HostedWorkflowManager` 管理。它复用手动运行的统一执行服务，让每一轮都写入完整运行记录、节点状态、WebSocket 事件和 Trace；循环状态写入 `workflow_hosting` 表，并在 API 进程重启时恢复。终止策略支持循环上限、异常状态、手动停止，以及对 `WorkflowResult.to_dict()` 嵌套字段的确定性比较。该管理器同样是单进程实现，不提供多实例选主或分布式锁。
+
+### SupervisorOrchestrator
+
+`supervisor` 模式使用配置的 Supervisor Agent 的模型：
+
+1. 可选全局规划将任务拆为步骤；相同 `order` 的步骤会被并行派发。
+2. 一批结果返回后，将每个节点的完整 payload、步骤 ID、消息类型、累计历史、终止候选和静态路由建议交给 Supervisor；静态路由不再绕过审阅。
+3. 当收到 `status: error` 且允许干预时，Supervisor 可重试、改派、跳过或终止。
+4. Supervisor 的工作流级 `responsibility` 与 `capabilities` 会和所选模板的基础角色一起注入规划、审阅、失败干预和总结 Prompt。
+5. 无待处理目标时，Supervisor 对完整步骤结果生成总结；非法或不在当前工作流内的目标会被拒绝。
+
+规划 JSON 中的 `depends_on` 目前没有直接执行约束；要表达真实依赖，应使用 `order`、静态路由或 `join`。
+
+## 平台与 API
+
+FastAPI 路由覆盖系统状态、工作流、Agent、日志、配置、凭据、模型配置、Trace 和 Skill。工作流 API 的特点：
+
+- 首次读取 YAML 工作流时，将其实体化为可视化平台模型。
+- 编辑画布后，平台将可运行定义同步写回 `config/workflows/*.yaml`。
+- 保存 Cron Trigger 时实时同步运行中调度器；定时运行与手动运行共享历史数据模型。
+- 执行时创建 run、异步调用引擎、持久化节点/事件状态，并用 `run_id` 推送 WebSocket 事件。
+- 工作流 Agent 实体可从 Agent 模板实例化，并在一次运行中使用唯一消息身份以隔离并发执行。
+- Credential 与模型配置均支持创建、编辑和删除；编辑模型配置会同步更新引用它的 Agent YAML 模板及当前运行实例。加密 Credential 编辑时留空新密钥会保留原密文，显式输入时才轮换。
+- Provider catalog 同时提供常见模型 ID 建议；模型配置表单会随 Provider 切换建议列表，但允许输入目录外的精确模型 ID，以兼容私有部署和新模型。
+
+## 配置模型
+
+关键 Pydantic 配置类型位于 `src/axonflow/config/models.py`：
+
+- `AgentConfig`：角色、模型、工具、Tags、`can_request`、重试、记忆、Persona、Skill、扩展参数。
+- `DiscoveryConfig`：能力描述、Tools/Skills/Tags、排除列表、排序阈值、候选数、超时及错误/超时替换策略。
+- `AgentInstanceConfig`：固定模板或动态发现槽，以及固定节点的可选故障替换策略。
+- `WorkflowConfig`：参与 Agent、可选工作流实体、触发器、流程和上下文。
+- `FlowConfig`：模式、入口、路由、终止条件、join、Supervisor、迭代与超时。
+- `ModelConfig`：模型提供商、名称、温度、Token、端点、凭据和 fallback。
+
+## 当前设计边界
+
+| 主题 | 当前行为 | 使用建议 |
+|---|---|---|
+| 基础 Agent 状态 | 正常文本结果固定为 `success` | 质量门应使用自定义/Remote Agent 返回结构化通过或失败 |
+| 直接 Agent 通信 | 仅自定义代码可通过 `send_request()` 主动使用 | 将常规协作放在编排路由，避免无边界群聊 |
+| 内存降级 | 仅进程内队列 | 生产环境依赖 Redis，并补充恢复策略 |
+| 回路 | 最大迭代与超时终止 | 传递可操作的失败证据并设置交付终止条件 |
+| 工具安全 | 工具能力按 Agent 配置授予 | 对 Shell、Git、文件写入和发布动作设置隔离与最小权限 |
+| 能力发现 | 只搜索本地注册表，使用确定性词项评分 | 对外部 ADP 增加身份、签名、健康检查和信任策略后再用于跨组织发现 |
+
+关于需求—编码—测试—评测闭环的配置和实现方式，见 [工作流模式与局部 ReAct](WORKFLOW_PATTERNS.md)。
+复杂 Agent 的接入契约、动态占位节点和故障替换见 [复杂 Agent 接入、发现与故障替换](AGENT_INTEGRATION.md)。

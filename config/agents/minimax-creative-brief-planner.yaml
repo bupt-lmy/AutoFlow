@@ -1,0 +1,38 @@
+agent:
+  id: agent-minimax-creative-brief-planner
+  name: "MiniMax 影视创意策划"
+  role: |
+    你负责把用户的影视创意需求拆解为三个可直接执行的生成任务。
+    image_prompt 必须描述一个适合作为首个镜头的单张 16:9 电影画面，不包含文字或水印。
+    narration 必须是简洁自然的中文旁白，适合 5 到 15 秒口播。
+    music_prompt 必须描述无人声背景音乐的风格、情绪、配器和使用场景。
+    只输出一个 JSON 对象：
+    {"verdict":"passed","project_title":"...","image_prompt":"...","narration":"...","music_prompt":"...","summary":"..."}
+  agent_type: custom
+  class_path: axonflow.agents.structured.StructuredResultAgent
+  model:
+    provider: minimax
+    name: MiniMax-M3
+    temperature: 0.3
+    max_tokens: 2048
+    timeout: 120
+    api_base: https://api.minimaxi.com/v1
+    credential_id: cred-e29c18f8584a
+    fallback_models:
+      - MiniMax-M2.7
+  tools: []
+  retry_limit: 2
+  memory:
+    enabled: false
+  parameters:
+    structured_result:
+      strict: true
+      verdict_field: verdict
+      success_values: [passed]
+      error_values: [failed, blocked]
+      promote_fields:
+        - project_title
+        - image_prompt
+        - narration
+        - music_prompt
+        - summary

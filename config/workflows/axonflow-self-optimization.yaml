@@ -1,0 +1,115 @@
+workflow:
+  id: axonflow-self-optimization
+  name: AxonFlow 产品自优化闭环
+  extends: null
+  trigger:
+    type: manual
+    cron: null
+    event: null
+    timezone: Asia/Shanghai
+    input: ''
+  agents:
+  - axonflow-self-optimization--node-agent-product-manager
+  - axonflow-self-optimization--node-agent-requirement-reviewer
+  - axonflow-self-optimization--node-agent-codex-coder
+  - axonflow-self-optimization--node-agent-acceptance-tester
+  agent_instances:
+  - id: axonflow-self-optimization--node-agent-product-manager
+    node_id: node-agent-product-manager
+    template_id: agent-product-manager
+    name: 产品改进 Agent
+    model_profile_id: null
+    discovery: null
+    fallback_discovery: null
+  - id: axonflow-self-optimization--node-agent-requirement-reviewer
+    node_id: node-agent-requirement-reviewer
+    template_id: agent-requirement-reviewer
+    name: 需求审核 Agent
+    model_profile_id: null
+    discovery: null
+    fallback_discovery: null
+  - id: axonflow-self-optimization--node-agent-codex-coder
+    node_id: node-agent-codex-coder
+    template_id: agent-codex-coder
+    name: Codex 编码 Agent
+    model_profile_id: null
+    discovery: null
+    fallback_discovery: null
+  - id: axonflow-self-optimization--node-agent-acceptance-tester
+    node_id: node-agent-acceptance-tester
+    template_id: agent-acceptance-tester
+    name: 浏览器验收 Agent
+    model_profile_id: null
+    discovery: null
+    fallback_discovery: null
+  flow:
+    mode: supervisor
+    entry: axonflow-self-optimization--node-agent-product-manager
+    max_iterations: 12
+    timeout: 5400
+    routes:
+      axonflow-self-optimization--node-agent-product-manager:
+      - target: axonflow-self-optimization--node-agent-codex-coder
+        condition:
+          field: status
+          operator: eq
+          value: success
+        payload_mapping:
+          include: []
+          task_field: task
+      axonflow-self-optimization--node-agent-codex-coder:
+      - target: axonflow-self-optimization--node-agent-acceptance-tester
+        condition:
+          field: status
+          operator: eq
+          value: success
+        payload_mapping:
+          include:
+          - content
+          - files_changed
+          - tests
+          - notes
+          - artifacts
+          - outcome_status
+          task_field: content
+      axonflow-self-optimization--node-agent-acceptance-tester:
+      - target: axonflow-self-optimization--node-agent-codex-coder
+        condition:
+          field: status
+          operator: eq
+          value: error
+        payload_mapping:
+          include:
+          - error
+          - content
+          - structured
+          - requirements
+          - commands
+          - browser_checks
+          - failures
+          task_field: error
+    terminate_on:
+    - agent: axonflow-self-optimization--node-agent-acceptance-tester
+      status: success
+    join: {}
+    supervisor:
+      agent_id: axonflow-self-optimization--node-agent-requirement-reviewer
+      responsibility: 审核产品 Agent 提出的任务是否有证据、有价值、范围合理且可测试；只有批准后才交给 Codex。 审核 Codex
+        变更证据后交给测试 Agent；测试失败时携带完整证据退回 Codex，全部通过且日志已保存时结束。
+      capabilities:
+      - requirement evidence review
+      - scope and safety gate
+      - implementation evidence review
+      - acceptance result review
+      - rework routing
+      planning_enabled: false
+      intervention_on_failure: true
+  context:
+    project_dir: .
+    frontend_url: http://127.0.0.1:5173
+    api_url: http://127.0.0.1:8000
+    optimization_report: docs/optimization/SELF_OPTIMIZATION_LOG.md
+    agent_role_overrides:
+      axonflow-self-optimization--node-agent-product-manager: 检查当前 AxonFlow 仓库与运行状态，只提出一个有证据、范围明确、可自动验收的改进任务。
+      axonflow-self-optimization--node-agent-codex-coder: 实现审核通过的单个任务，保留无关改动，运行相关测试，并返回文件与测试证据。
+      axonflow-self-optimization--node-agent-acceptance-tester: 按验收标准运行自动化和真实浏览器检查，逐项用中文记录结果；失败时提供可复现证据。

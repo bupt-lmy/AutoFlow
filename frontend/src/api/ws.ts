@@ -1,11 +1,28 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
+interface WsEventData {
+  [key: string]: unknown;
+  error?: unknown;
+  payload?: WsEventData;
+  failures?: unknown;
+  node_id?: string;
+  agent_id?: string;
+  supervisor_agent_id?: string;
+  input?: unknown;
+  arguments?: { next_attempt?: number };
+  terminal_candidate?: boolean;
+  next_agents?: string[];
+  outcome?: string;
+  task?: unknown;
+  content?: unknown;
+}
+
 export interface WsEvent {
   type: string;
   workflow_id?: string;
   run_id?: string;
   timestamp?: string;
-  data?: any;
+  data?: WsEventData;
 }
 
 export function useWebSocket(runId: string | null) {
@@ -26,7 +43,9 @@ export function useWebSocket(runId: string | null) {
       try {
         const event: WsEvent = JSON.parse(e.data);
         setEvents(prev => [...prev, event]);
-      } catch {}
+      } catch {
+        // Ignore non-JSON keepalive or malformed messages.
+      }
     };
 
     // Keep alive ping

@@ -1,0 +1,9 @@
+agent:
+  id: agent-generation-resource-search
+  name: "生成视频参考资源搜集器"
+  role: "根据语言或文本描述搜集可用于视觉研究的开放网页与 Creative Commons 候选资源；搜索失败不阻塞纯生成。"
+  agent_type: custom
+  class_path: axonflow.agents.generated_video.GenerationResourceSearchAgent
+  tools: [web_search]
+  retry_limit: 1
+  memory: {enabled: false}
